@@ -1,0 +1,64 @@
+{
+  "initialized_on": "2026-11-02",
+  "project_root": "/Users/tpx-198/code/AD-L",
+  "environment_name": "ad-l",
+  "environment_prefix": "/Users/tpx-198/miniconda3/envs/ad-l",
+  "python_version": "3.10.21",
+  "cloned_from": "/Users/tpx-198/miniconda3/envs/agentdropout",
+  "reference_project": "/Users/tpx-198/code/AgentDropout",
+  "stage": "environment-and-scaffold-only",
+  "key_packages": {
+    "langchain": "1.4.7",
+    "langchain-core": "1.7.3",
+    "langchain-deepseek": "1.1.1",
+    "langgraph": "1.2.19",
+    "torch": "2.5.1",
+    "openai": "3.42.1",
+    "setuptools": "69.1.1"
+  },
+  "added_packages": {
+    "httpcore2": "2.14.0",
+    "httpx2": "2.14.0",
+    "jsonpatch": "1.39",
+    "jsonpointer": "3.7",
+    "langchain": "1.4.7",
+    "langchain-core": "1.7.3",
+    "langchain-deepseek": "1.1.1",
+    "langchain-openai": "1.7.3",
+    "langchain-protocol": "0.0.20",
+    "langgraph": "1.2.19",
+    "langgraph-checkpoint": "4.3.1",
+    "langgraph-prebuilt": "1.1.1",
+    "langgraph-sdk": "0.4.11",
+    "langsmith": "0.14.17",
+    "orjson": "3.13.0",
+    "ormsgpack": "1.12.2",
+    "requests-toolbelt": "1.0.0",
+    "truststore": "0.10.5",
+    "uuid-utils": "0.19.0",
+    "websockets": "16.1.1",
+    "xxhash": "4.0.2",
+    "zstandard": "0.25.0"
+  },
+  "changed_packages": {
+    "certifi": {
+      "before": "2026.7.22",
+      "after": "2026.10.23"
+    },
+    "openai": {
+      "before": "1.58.1",
+      "after": "3.42.1"
+    }
+  },
+  "verification": {
+    "pip_check": "passed",
+    "langchain_local_chain": "passed",
+    "langgraph_local_graph": "passed",
+    "deepseek_import": "passed",
+    "class_registry_import": "passed",
+    "pytorch_autograd": "passed",
+    "original_environment_package_versions": "unchanged",
+    "model_api_requests": 0
+  },
+  "clone_compatibility_note": "克隆遗留的 setuptools 83.0.0 重复 egg-info 已移至临时备份；实际保留原项目可用的 setuptools 69.1.1。"
+}
