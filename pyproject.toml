@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=69", "wheel"]
+requires = ["setuptools==69.1.1", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -9,11 +9,16 @@ description = "AgentDropout rebuilt with LangChain and LangGraph"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+  "langchain==1.4.7",
   "langchain-core==1.7.3",
   "langchain-deepseek==1.1.1",
   "langgraph==1.2.19",
   "langsmith==0.14.17",
   "python-dotenv==1.0.0",
+  "torch==2.5.1",
+  "class-registry==2.1.2",
+  # 原注册组件依赖 pkg_resources，沿用已验证的兼容版本。
+  "setuptools==69.1.1",
 ]
 
 [tool.setuptools.packages.find]
@@ -22,4 +27,4 @@ include = ["ad_l*"]
 namespaces = false
 
 [tool.setuptools.package-data]
-ad_l = ["resources/*.json"]
+ad_l = ["resources/prompts/*.json"]

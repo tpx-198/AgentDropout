@@ -1,0 +1,17 @@
+{
+  "backend": "mock",
+  "rounds": 2,
+  "spatial_masks": [[0, 1], [0, 0]],
+  "temporal_masks": [[1, 1], [1, 1]],
+  "responses": {
+    "A": [
+      "[MOCK A round 1] Add 3 and 2.\nThe answer is 5",
+      "[MOCK A round 2] Recheck 3 + 2 = 5.\nThe answer is 5"
+    ],
+    "B": [
+      "[MOCK B round 1] Let x = 3 + 2; x = 5.\nThe answer is 5",
+      "[MOCK B round 2] The current and previous analyses agree.\nThe answer is 5"
+    ]
+  },
+  "final_response": "[MOCK FinalRefer] Both agents give 5 in the final round.\nThe answer is 5"
+}

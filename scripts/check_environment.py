@@ -15,7 +15,7 @@ from langgraph.graph import StateGraph, START, END
 class State(TypedDict):
     answer: str
 
-"""检查 LangChain、LangGraph、DeepSeek 导入、原注册组件与 PyTorch 梯度是否正常。"""
+# 检查 LangChain、LangGraph、DeepSeek 导入、原注册组件与 PyTorch 梯度是否正常。
 def main():
     expected = Path('/Users/tpx-198/miniconda3/envs/ad-l')
     if Path(sys.prefix).resolve() != expected.resolve():

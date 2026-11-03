@@ -1,4 +1,7 @@
 # Python package snapshot: macOS ARM64 / Python 3.10; Conda system libraries are not included.
+# Local editable project: agentdropout-langchain==0.1.0 (recorded 2026-11-03).
+# Run from the repository root; source revision is tracked by Git.
+-e .
 aiohttp==3.9.0
 aiosignal==1.4.0
 annotated-types==0.8.0

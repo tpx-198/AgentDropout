@@ -1,5 +1,7 @@
 # 模型适配器与第一个智能体
 
+本文记录第一阶段的单智能体验证。后续已增加 [两个智能体、两轮固定图与最终汇总](fixed-graph.md)，原单智能体入口继续保留。
+
 ## 两者分别做什么
 
 模型适配器是智能体与具体模型之间的统一入口。智能体向它提交 LangChain 的 `SystemMessage`、`HumanMessage`，拿回 `AIMessage`。本地模拟与 DeepSeek 使用同一调用接口，支持 `invoke` 和 `ainvoke`；模型调用本身交给 LangChain 的聊天模型组件。模拟后端无需密钥，真实后端通过环境变量或指定的本地 `.env` 读取密钥，结果记录不保存密钥或完整客户端配置。
@@ -18,7 +20,7 @@
 - 原提示词：`AgentDropout/prompt/gsm8k_prompt_set.py` 中 `Math Solver` 角色。
 - 固定一个角色、一个智能体、一轮，无空间前驱与时间前驱，不自动循环分配角色。
 - 系统提示词、示例和消息拼接逐字保留，包括空前驱时的 `(Hint: The answer is near to).`。这不是新增提示词设计。
-- 提示词保存在 `src/ad_l/resources/gsm8k_math_solver.json`，附原文件 SHA-256；正常运行不依赖原项目目录。
+- 提示词保存在 `src/ad_l/resources/prompts/math_solver_prompts.json`，附原文件 SHA-256；正常运行不依赖原项目目录。
 - 对照测试仅抽取原提示词常量和 `_process_inputs` 方法执行，不导入原项目模型模块，也不读取原密钥。
 - 回答原样返回，不执行答案提取、代码执行或多智能体最终汇总。这是单节点迁移检查，尚未完成原 `Graph.run/arun` 的完整行为对齐。
 

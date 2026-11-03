@@ -1,7 +1,0 @@
-# 在 agentdropout 的克隆环境中安装。
-langchain==1.4.7
-langchain-deepseek==1.1.1
-langgraph==1.2.19
-python-dotenv==1.0.0
-# class-registry 2.1.2 仍依赖 pkg_resources，沿用原项目可用版本。
-setuptools==69.1.1

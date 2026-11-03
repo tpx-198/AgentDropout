@@ -7,33 +7,18 @@
 - 项目目录：`/Users/tpx-198/code/AD-L`。
 - Conda 环境：`ad-l`，由 `agentdropout` 克隆后安装新框架依赖。
 - 原项目 `/Users/tpx-198/code/AgentDropout` 作为只读参考与实验对照。
-- 已完成模型适配器与 GSM8K Math Solver 单轮流程，支持离线模拟和显式启用的 DeepSeek 后端；多智能体通信图与剪枝训练尚未迁移。
+- 已完成模型适配器、GSM8K Math Solver 单轮流程，以及两个智能体、两轮固定通信图和 FinalRefer 最终汇总的离线版本；拓扑学习与剪枝训练尚未迁移。
 
-## 启动与检查
+## 安装与环境
 
-```bash
-conda activate ad-l
-cd /Users/tpx-198/code/AD-L
-python scripts/check_environment.py
-python -m pip check
-```
-
-检查脚本只执行本地验证，不需要密钥，不调用模型 API。
-
-在已准备好的 `ad-l` 环境中，将本项目注册为可编辑包（不下载或更新依赖）：
-
-```bash
-python -m pip install -e . --no-deps --no-build-isolation --no-index
-```
-
-安装后，Python 可直接导入 `ad_l`，修改源码即时生效，无需为每次运行设置 `PYTHONPATH`。如果 VS Code 打开的是父目录 `/Users/tpx-198/code`，`AD-L/.vscode/` 中的配置不会作为该窗口的工作区配置生效；选择 `ad-l` 解释器并刷新窗口即可重新读取已安装的本地包，也可以单独打开 AD-L 文件夹。
+环境来源、安装、版本快照恢复和检查步骤统一见 [环境说明](docs/environment.md)。完成安装后，在 `ad-l` 环境、项目根目录运行下面的示例。
 
 ## 运行第一个智能体
 
 ```bash
 conda activate ad-l
 python scripts/run_single_agent.py
-PYTHONPATH=src python -m unittest discover -s tests -v
+python -m unittest discover -s tests -v
 ```
 
 默认例题为 3 个苹果再买 2 个。模拟模型固定返回带 `[MOCK]` 标识的演示答案；它不计算题目，也不能用来评测正确率。替换题目时可用 `--task`，替换模拟回答时可用 `--mock-response`。
@@ -52,25 +37,30 @@ python scripts/run_single_agent.py --backend deepseek --allow-real-api
 
 更多说明见 [单智能体迁移说明](docs/single-agent.md)。
 
-## 依赖记录
-
-- `requirements-langchain.txt`：在克隆环境上安装的框架与兼容性依赖。
-- `requirements-lock.txt`：完成安装后的 Python 包版本快照，面向当前 macOS / Python 3.10 环境。
-- `docs/source-environment.json`：原 agentdropout 环境的包版本快照。
-- `docs/environment.json`：克隆来源、安装结果与验证记录。
-
-重新创建同类环境时，先克隆原环境，再安装框架依赖并检查：
+## 两个智能体、两轮固定图
 
 ```bash
-conda create -n ad-l --clone agentdropout
-conda activate ad-l
-python -m pip install -r requirements-langchain.txt
-python -m pip check
+python scripts/run_fixed_graph.py --output results/fixed_graph/demo.json
+python scripts/run_fixed_graph.py --async
+python -m unittest discover -s tests -v
 ```
+
+此入口仅允许本地模拟，不读取 `.env`，不创建真实模型客户端。A 使用原 GSM8K `Math Solver` 提示词，B 使用 `Mathematical Analyst` 提示词，每轮按固定图执行，最后由 `FinalRefer` 汇总第二轮的两份回答，共 5 次模拟调用。
+
+预设回答与连接矩阵可在 [离线配置](configs/fixed_graph_offline.json) 中修改，或通过 `--config` 指定其他配置。修改题目时使用 `--task`；预设回答不会自动求解新题目。
+
+每份结果包含逐次调用的完整消息、轮内／跨轮可见输入、每轮输出、最终回答、配置矩阵和实际生效连接。原项目的固定时间边也受空间环路检查限制，本版保留该行为。具体可见性与迁移验证见 [固定图说明](docs/fixed-graph.md)。
+
+## 依赖记录
+
+- [pyproject.toml](pyproject.toml)：项目依赖与版本约束的统一声明，包括 LangChain、LangGraph、PyTorch 及原注册组件的兼容依赖；通过 `pip install -e .` 安装。
+- [requirements-lock.txt](requirements-lock.txt)：完整 Python 包版本快照及本地项目安装入口，面向 macOS ARM64 / Python 3.10。
+- [docs/environment.md](docs/environment.md)：环境来源、安装方式和依赖维护说明。
 
 ## 目录
 
 - `src/ad_l/`：后续模型适配、智能体、通信调度与剪枝实现。
+- `src/ad_l/resources/prompts/`：提示词资源，包含单智能体与多智能体协作提示词。
 - `configs/`：非敏感实验配置。
 - `scripts/`：检查及运行入口。
 - `data/`：后续准备的数据。
@@ -79,10 +69,9 @@ python -m pip check
 
 ## 下一步
 
-1. 扩展智能体角色，迁移最终汇总节点。
-2. 验证固定通信图中的轮内和跨轮消息可见性。
-3. 接回 PyTorch 拓扑学习和节点、边剪枝，保存训练检查点。
-4. 在一致评测条件下与原项目比较正确率、Token、耗时。
+1. 扩展固定图规模与其余角色，按授权范围建立真实模型基线。
+2. 接回 PyTorch 拓扑学习和节点、边剪枝，保存训练检查点。
+3. 在一致评测条件下与原项目比较正确率、Token、耗时。
 
 需要真实 API 时，将 `.env.example` 复制为 `.env` 并填写配置；运行入口仅在显式选择真实后端后加载该文件。未复制原项目密钥。
 
