@@ -8,3 +8,6 @@ __pycache__/
 results/
 data/
 *.log
+*.egg-info/
+build/
+dist/
