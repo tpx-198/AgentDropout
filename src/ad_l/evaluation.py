@@ -9,7 +9,7 @@ from time import perf_counter
 
 from langsmith import tracing_context
 
-from ad_l.fixed_graph import build_fixed_graph
+from ad_l.fixed_graph import build_fixed_graph, resolve_fixed_topology
 from ad_l.gsm8k_compat import gsm_get_predict
 from ad_l.models import ModelAdapter, create_model_adapter
 from ad_l.prompts import build_math_solver_messages
@@ -95,8 +95,14 @@ def write_json(path, value):
 
 def run_baselines(samples, config, settings, output_dir: Path, manifest: dict, *,
                   baselines=("single", "fixed"), allow_real_api=False, adapter_factory=None,
-                  learned_policy=None, learned_generator=None, learned_mode="sampled", learned_temperature=1.0):
-    if not samples or not baselines or len(set(baselines)) != len(baselines) or set(baselines) - {"single", "fixed", "learned"}:
+                  learned_policy=None, learned_generator=None, learned_mode="sampled", learned_temperature=1.0,
+                  policy_variants=None):
+    policy_variants = policy_variants or {}
+    if set(policy_variants) & {"single", "fixed", "learned"}:
+        raise ValueError("配对变体名称不能覆盖原有基线")
+    if policy_variants and (learned_mode != "original-fixed" or any(sample.split != "test" for sample in samples)):
+        raise ValueError("剪枝配对评测只支持 test 划分和相同的 original-fixed 推理")
+    if not samples or not baselines or len(set(baselines)) != len(baselines) or set(baselines) - {"single", "fixed", "learned", *policy_variants}:
         raise ValueError("需要非空样本和 single/fixed 基线")
     if "learned" in baselines:
         if learned_policy is None or learned_generator is None or any(sample.split != "test" for sample in samples):
@@ -126,6 +132,7 @@ def run_baselines(samples, config, settings, output_dir: Path, manifest: dict, *
                 for baseline in baselines:
                     started = perf_counter()
                     sampled_rounds = None
+                    effective_topology = None
                     try:
                         if baseline == "single":
                             adapter = make_adapter()
@@ -134,19 +141,21 @@ def run_baselines(samples, config, settings, output_dir: Path, manifest: dict, *
                                 node: make_adapter() for node in ("A", "B", "final")}
                             active_config = config
                             round_topologies = None
-                            if baseline == "learned":
+                            if baseline == "learned" or baseline in policy_variants:
                                 import torch
                                 from dataclasses import replace
-                                learned_policy.eval()
+                                policy = policy_variants[baseline] if baseline in policy_variants else learned_policy
+                                policy.eval()
                                 with torch.no_grad():
                                     if learned_mode == "sampled":
-                                        sampled_rounds = learned_policy.sample_rounds(
+                                        sampled_rounds = policy.sample_rounds(
                                             temperature=learned_temperature, generator=learned_generator)
                                         round_topologies = [item.for_execution() for item in sampled_rounds]
                                     else:
                                         active_config = replace(config,
-                                            spatial_masks=tuple(tuple(int(v) for v in row) for row in learned_policy.spatial_masks.tolist()),
-                                            temporal_masks=tuple(tuple(int(v) for v in row) for row in learned_policy.temporal_masks.tolist()))
+                                            spatial_masks=tuple(tuple(int(v) for v in row) for row in policy.spatial_masks.tolist()),
+                                            temporal_masks=tuple(tuple(int(v) for v in row) for row in policy.temporal_masks.tolist()))
+                            effective_topology = resolve_fixed_topology(active_config) if round_topologies is None else None
                             graph = build_fixed_graph(active_config, adapters, allow_real_api=allow_real_api,
                                                       round_topologies=round_topologies)
                     except Exception as error:
@@ -162,7 +171,8 @@ def run_baselines(samples, config, settings, output_dir: Path, manifest: dict, *
                            "trace": state["trace"], "round_outputs": state["round_outputs"],
                            "model_calls": state["model_calls"], "real_api_calls": state["real_api_calls"],
                            "setup_error": state.get("setup_error"),
-                           "learned_mode": learned_mode if baseline == "learned" else None,
+                           "learned_mode": learned_mode if baseline == "learned" or baseline in policy_variants else None,
+                           "effective_topology": effective_topology,
                            "sampled_rounds": [item.for_report() for item in sampled_rounds] if sampled_rounds is not None else None,
                            "elapsed_seconds": perf_counter() - started,
                            **score_answer(state["answer"], sample.target, state["status"])}

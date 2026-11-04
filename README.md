@@ -7,7 +7,7 @@
 - 项目目录：`/Users/tpx-198/code/AD-L`。
 - Conda 环境：`ad-l`，由 `agentdropout` 克隆后安装新框架依赖。
 - 原项目 `/Users/tpx-198/code/AgentDropout` 作为只读参考与实验对照。
-- 已完成模型适配器、单智能体、两轮固定图、GSM8K 批量基线、可恢复的多步拓扑训练与学习后评测；剪枝与逐轮独立参数待后续迁移。
+- 已完成模型适配器、固定图、GSM8K 批量基线、多步拓扑训练与恢复、学习后评测，以及独立边剪枝和剪枝前后配对评测；节点剪枝与逐轮独立参数待后续迁移。
 
 ## 安装与环境
 
@@ -85,6 +85,14 @@ python evaluate.py --checkpoint results/topology/gsm8k-demo/checkpoint.pt --limi
 
 默认使用 GSM8K train 数据和模拟响应进行 3 步训练，每步 2 题；学习后评测冻结参数，在同一批 test 题上比较单智能体、固定图和学习后采样图。训练记录和可恢复检查点保存到 `results/topology/`。添加 `--resume 检查点 --steps 目标总步数` 可继续训练。真实训练或评测须显式添加 `--deepseek`，可先用 `--plan` 查看规模；上例真实训练最多 30 次、评测最多 110 次模型调用。模拟结果只验证流程。推理规则及恢复约束详见 [拓扑学习说明](docs/topology-training.md)。
 
+## 边剪枝与配对评测
+
+```bash
+python prune.py --checkpoint results/topology/gsm8k-demo/checkpoint.pt
+```
+
+默认按原规则剪除低权重候选边，在同一批 10 道 test 题上用相同的固定推理模式对比剪枝前后。默认模拟；添加 `--deepseek` 明确允许最多 100 次真实调用，`--plan` 只查看计划，`--prune-only` 只保存剪枝产物。结果保存在 `results/pruning/`，原检查点保持只读。详见 [边剪枝说明](docs/edge-pruning.md)。
+
 ## 依赖记录
 
 - [pyproject.toml](pyproject.toml)：项目依赖与版本约束的统一声明，包括 LangChain、LangGraph、PyTorch 及原注册组件的兼容依赖；通过 `pip install -e .` 安装。
@@ -104,7 +112,7 @@ python evaluate.py --checkpoint results/topology/gsm8k-demo/checkpoint.pt --limi
 ## 下一步
 
 1. 按明确的样本规模运行真实 GSM8K 基线，扩展固定图规模与其余角色。
-2. 在多步训练和学习后评测基础上迁移节点、边剪枝及逐轮独立拓扑参数。
+2. 在独立边剪枝基础上迁移周期性训练剪枝、节点剪枝及逐轮独立拓扑参数。
 3. 在一致评测条件下与原项目比较正确率、Token、耗时。
 
 需要真实 API 时，将 `.env.example` 复制为 `.env` 并填写配置；运行入口仅在显式选择真实后端后加载该文件。未复制原项目密钥。

@@ -51,6 +51,8 @@ def train_multistep(pool, config, settings, context, output_dir, total_steps, *,
     hp = context["hyperparameters"]
     if checkpoint is not None and checkpoint["context"] != context:
         raise ValueError("续训的数据、模型、提示词、源码或训练参数与检查点不一致")
+    if checkpoint and checkpoint.get("evaluation_only"):
+        raise ValueError("独立剪枝产物仅供评测；当前训练入口不接收它续训")
     if context.get("settings") != asdict(settings) or context.get("config") != config.to_dict():
         raise ValueError("上下文必须记录实际模型和通信配置")
     if context.get("pool_sample_ids") != [sample.sample_id for sample in pool]:
