@@ -1,16 +1,55 @@
-# 两个智能体、两轮固定通信图的离线版本
+# 两个智能体、两轮固定通信图与模型注入
 
 ## 运行
 
 在 `ad-l` 环境、AD-L 项目根目录执行：
 
 ```bash
-python scripts/run_fixed_graph.py --output results/fixed_graph/demo.json
-python scripts/run_fixed_graph.py --async --output results/fixed_graph/demo-async.json
+python run.py
+python run.py --async
 python -m unittest discover -s tests -v
 ```
 
-此入口仅支持 `mock` 后端，关闭追踪，不加载 `.env`。模拟回答由配置提供，不会根据题目计算答案，也不能据此报告模型正确率。
+此入口默认 `mock` 后端，关闭追踪；模拟模式不加载 `.env`。模拟回答由配置提供，不会根据题目计算答案，也不能据此报告模型正确率。原离线入口 `build_offline_fixed_graph` 继续可用，与新的 `build_fixed_graph` 共用执行流程。
+
+## DeepSeek 配置
+
+在项目根目录创建本地 `.env`（参考 `.env.example`），填写：
+
+```dotenv
+DEEPSEEK_API_KEY=填写你的密钥
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=填写账户可用的模型名称
+LANGSMITH_TRACING=false
+```
+
+`.env` 已被 Git 忽略。密钥只填本地文件或环境变量；程序不会将密钥或客户端对象写入结果。已有环境变量优先于 `.env`。
+
+```bash
+python run.py --deepseek
+```
+
+`--deepseek` 等同于 `--backend deepseek --allow-real-api`，这条命令会发送真实请求，成功执行共 5 次。结果自动保存到 `results/fixed_graph/` 的独立 JSON 文件，终端会显示完整路径；可添加 `--output` 指定位置。可添加 `--async`，或使用 `--model`、`--temperature`、`--max-tokens`、`--timeout` 指定参数。默认温度和输出长度继续省略，超时为 60 秒，自动重试为零。失败后立即停止，保存记录并以非零状态退出。原 `scripts/run_fixed_graph.py` 入口继续可用。
+
+离线配置文件中的 `backend=mock` 表示预设回答场景；真正选择模型后端使用命令行 `--deepseek` 或 `--backend`。真实模式沿用该文件的连接矩阵，忽略预设回答。结果中真实模式仅保存连接配置，避免把模拟场景误认为模型输出。
+
+## 程序中注入适配器
+
+```python
+from pathlib import Path
+from langsmith import tracing_context
+from ad_l.fixed_graph import build_fixed_graph, load_fixed_graph_config
+from ad_l.models import create_model_adapter
+
+config = load_fixed_graph_config(Path("configs/fixed_graph_offline.json"))
+adapters = {node: create_model_adapter(mock_response=f"{node}: The answer is 5")
+            for node in ("A", "B", "final")}
+graph = build_fixed_graph(config, adapters)
+with tracing_context(enabled=False):
+    result = graph.invoke({"task": "3 + 2?"})
+```
+
+映射必须包含 A、B、final，可分别配置不同模型。真实适配器在创建和注入图时都需要显式 `allow_real_api=True`。命令行的三个节点共用一个无会话记忆的 DeepSeek 适配器；每次只传入该节点按通信规则可见的两条消息。自定义有响应游标的模拟适配器由调用方管理；默认离线入口仍为每次调用创建独立模拟客户端。
 
 角色固定为 A＝GSM8K Math Solver、B＝GSM8K Mathematical Analyst；两个角色都来自原项目的 `MathSolver` 类。最终决策使用原 `experiments/run_gsm8k.py` 默认的 `FinalRefer`。
 
@@ -63,13 +102,19 @@ flowchart LR
 - 保留 `FinalRefer` 的系统／用户提示词、示例，以及按 A、B 顺序传入最终输出的规则。
 - 提示词和原函数均存于本项目，不依赖运行时访问原项目；原文件 SHA-256 保存在资源 JSON 中。
 - 支持同步 `invoke` 和异步 `ainvoke`。轮内仍按原图的顺序执行；异步接口不表示两个有依赖关系的节点会同时执行。
-- 每次调用按角色和轮次选取预设响应，并创建独立模拟客户端，不共享响应游标。重复运行和同一张编译图的并发任务互不混入消息。
-- 仅迁移两角色、两轮、固定连接的正常执行路径；模型错误直接终止。未迁移原调度器的失败重试、超时策略、跳过节点、动态采样或训练／剪枝。
+- 默认模拟调用按角色和轮次选取预设响应，并创建独立模拟客户端，不共享响应游标。重复运行和同一张编译图的并发任务互不混入消息。
+- 迁移两角色、两轮、固定连接的执行路径；模型调用失败会记录错误并终止后续调用。未迁移原调度器的失败重试、超时策略、跳过节点、动态采样或训练／剪枝。
 - 未引入训练梯度张量，也没有启用流程检查点。
 
 ## 记录与验证
 
-输出 JSON 保存任务、角色、原始配置、实际连接、模型配置、随机种子、库版本、每次调用的可见输入／完整消息／输出、每轮回答、最终回答、调用次数和耗时。手工输入标为 `data_split=manual`；模拟 Token 用量为 `null`，来源标为 `mock_not_measured`；真实模型请求为 0。固定模拟过程不使用随机采样，保存的本地种子不代表真实模型可复现性。
+输出 JSON 的 `schema_version=2`。每次调用保存节点、轮次、可见输入、完整消息、模型配置、UTC 开始时间、耗时、成功／失败状态、回答、Token 用量及来源。失败只保存异常类型和可用的 HTTP 状态码，不保存可能含凭据的异常原文。
+
+顶层 `status` 表示本次运行结果。`trace` 保留已完成调用和失败尝试；`current_outputs` 中的部分轮次输出可通过成功调用的 trace 恢复。失败时不会用未完成的输出继续汇总。
+
+`usage` 仅在所有调用均返回用量时给出总和，否则为 `null`；`known_usage` 是已返回用量的小计，不能视作完整实际用量，`usage_complete` 表示是否齐全。模拟用量来源为 `mock_not_measured`。真实模式中，每次用量来自提供方；缺失用量或失败会使顶层来源为 `provider_incomplete`。
+
+`model_calls` 是调用适配器的尝试次数，`real_api_calls` 是其中的真实后端尝试次数，包含失败尝试；超时／连接错误时不能据此断言服务端实际处理或计费次数。固定图要求 `max_retries=0`，不隐藏重试。只有成功完成才有最终回答。记录还包含任务、数据划分、随机种子、库版本、提示词来源和每轮输出；手工输入仍为 `data_split=manual`，本地种子不代表真实生成可复现性。
 
 新增测试覆盖 5 次调用的顺序、第一轮无时间信息、跨轮快照、最后一轮汇总、断边后的隔离、同步／异步一致、重复／并发任务隔离、错误立即终止、配置验证与离线命令行结果。
 

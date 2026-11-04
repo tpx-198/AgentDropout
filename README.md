@@ -40,12 +40,20 @@ python scripts/run_single_agent.py --backend deepseek --allow-real-api
 ## 两个智能体、两轮固定图
 
 ```bash
-python scripts/run_fixed_graph.py --output results/fixed_graph/demo.json
-python scripts/run_fixed_graph.py --async
+python run.py
+python run.py --async
 python -m unittest discover -s tests -v
 ```
 
-此入口仅允许本地模拟，不读取 `.env`，不创建真实模型客户端。A 使用原 GSM8K `Math Solver` 提示词，B 使用 `Mathematical Analyst` 提示词，每轮按固定图执行，最后由 `FinalRefer` 汇总第二轮的两份回答，共 5 次模拟调用。
+此入口默认本地模拟；模拟模式不读取 `.env`。A 使用原 GSM8K `Math Solver` 提示词，B 使用 `Mathematical Analyst` 提示词，每轮按固定图执行，最后由 `FinalRefer` 汇总第二轮的两份回答，共 5 次模型调用。固定图支持分别注入三个节点的模型适配器，同步与异步共用提示词和通信规则。
+
+需要使用 DeepSeek 时，在根目录本地 `.env` 中填写 `.env.example` 的 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`，然后显式运行：
+
+```bash
+python run.py --deepseek
+```
+
+`--deepseek` 同时选择 DeepSeek 并显式允许真实请求，完整成功运行包含 5 次调用。结果自动保存到 `results/fixed_graph/`，每次使用独立文件；需要指定路径时添加 `--output`。详细参数、注入方式和失败记录见 [固定图说明](docs/fixed-graph.md)。
 
 预设回答与连接矩阵可在 [离线配置](configs/fixed_graph_offline.json) 中修改，或通过 `--config` 指定其他配置。修改题目时使用 `--task`；预设回答不会自动求解新题目。
 

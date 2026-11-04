@@ -1,15 +1,18 @@
-"""两个数学智能体、两轮固定通信图、FinalRefer；本阶段仅使用离线模型。"""
+"""两个数学智能体、两轮固定通信图、FinalRefer，支持注入模型适配器。"""
 
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
+from typing import Mapping
 
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableLambda
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
-from ad_l.models import create_model_adapter
+from ad_l.models import ModelAdapter, ModelSettings, create_model_adapter
 from ad_l.prompts import build_final_refer_messages, build_math_agent_messages
 
 AGENTS = {"A": "Math Solver", "B": "Mathematical Analyst"}
@@ -118,9 +121,29 @@ class FixedGraphState(FixedGraphInput, total=False):
     usage: dict | None
     model_calls: int
     real_api_calls: int
+    status: str
+    known_usage: dict
+    usage_complete: bool
 
 
-def build_offline_fixed_graph(config: OfflineFixedGraphConfig):
+def build_fixed_graph(
+    config: OfflineFixedGraphConfig,
+    adapters: Mapping[str, ModelAdapter] | None = None,
+    *,
+    allow_real_api: bool = False,
+):
+    """adapters 的键为 A、B、final；省略时按原预设响应离线运行。"""
+    adapters = dict(adapters) if adapters is not None else None
+    if adapters is not None:
+        if set(adapters) != {*AGENTS, "final"}:
+            raise ValueError("注入适配器必须同时提供 A、B、final")
+        for adapter in adapters.values():
+            if not isinstance(adapter, ModelAdapter):
+                raise TypeError("必须注入 ModelAdapter 对象")
+            if adapter.settings.backend != "mock" and not allow_real_api:
+                raise ValueError("真实模型请求需显式设置 allow_real_api=True")
+            if adapter.settings.max_retries != 0:
+                raise ValueError("固定图当前要求 max_retries=0，以明确记录每次调用尝试")
     topology = resolve_fixed_topology(config)
 
     def initialize(state: FixedGraphInput):
@@ -128,7 +151,9 @@ def build_offline_fixed_graph(config: OfflineFixedGraphConfig):
         if not isinstance(task, str) or not task.strip():
             raise ValueError("task 必须为非空字符串")
         return {"current_outputs": {}, "previous_outputs": {}, "round_outputs": [],
-                "trace": [], "answer": "", "usage": None, "model_calls": 0, "real_api_calls": 0}
+                "trace": [], "answer": "", "usage": None, "model_calls": 0, "real_api_calls": 0,
+                "status": "running", "known_usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                "usage_complete": False}
 
     def visible(outputs, edges, target):
         return {source: {"role": AGENTS[source], "output": outputs[source]}
@@ -150,35 +175,62 @@ def build_offline_fixed_graph(config: OfflineFixedGraphConfig):
                 messages = build_math_agent_messages(state["task"], AGENTS[node_id], spatial, temporal)
                 text = config.responses[list(AGENTS).index(node_id)][round_index]
             # 每次调用单独创建模拟客户端，避免共享响应游标导致任务间或并发运行串线。
-            adapter = create_model_adapter(mock_response=text)
+            adapter = adapters[node_id] if adapters is not None else create_model_adapter(mock_response=text)
             return messages, spatial, temporal, adapter
 
-        def complete(state, messages, spatial, temporal, response: AIMessage):
-            if not isinstance(response.content, str):
-                raise TypeError("固定图仅支持文本回答")
+        def complete(state, messages, spatial, temporal, adapter, started_at, started, response=None, error=None):
+            usage = response.usage_metadata if isinstance(response, AIMessage) else None
+            if error is None and (not isinstance(response, AIMessage) or not isinstance(response.content, str)):
+                error = TypeError("固定图仅支持 AIMessage 文本回答")
             entry = {"stage": "final" if final else "agent", "round": round_index + 1,
                      "node_id": node_id, "role": "FinalRefer" if final else AGENTS[node_id],
                      "spatial_info": spatial, "temporal_info": temporal,
                      "messages": [{"role": m.type, "content": m.content} for m in messages],
-                     "output": response.content, "usage": response.usage_metadata}
+                     "output": response.content if error is None else None, "usage": usage,
+                     "settings": asdict(adapter.settings), "started_at_utc": started_at,
+                     "elapsed_seconds": perf_counter() - started,
+                     "status": "failed" if error else "success",
+                     # 异常原文可能包含请求头或凭据，不写入结果或终端。
+                     "error": {"type": type(error).__name__, "message": "模型调用或回答处理失败",
+                               "status_code": getattr(error, "status_code", None)
+                               if type(getattr(error, "status_code", None)) is int else None} if error else None,
+                     "usage_source": "mock_not_measured" if adapter.settings.backend == "mock" else (
+                         "provider" if usage is not None else "provider_unavailable"),
+                     "real_api_attempted": adapter.settings.backend != "mock"}
             trace = [*state["trace"], entry]
-            update = {"trace": trace, "model_calls": len(trace)}
-            if final:
+            known_usage = {key: sum(call["usage"][key] for call in trace if call["usage"] is not None)
+                           for key in ("input_tokens", "output_tokens", "total_tokens")}
+            complete_usage = all(call["usage"] is not None for call in trace)
+            update = {"trace": trace, "model_calls": len(trace), "known_usage": known_usage,
+                      "usage_complete": complete_usage,
+                      "usage": known_usage if complete_usage else None,
+                      "real_api_calls": sum(call["real_api_attempted"] for call in trace)}
+            if error is not None:
+                update["status"] = "failed"
+            elif final:
                 update["answer"] = response.content
-                if all(call["usage"] is not None for call in trace):
-                    update["usage"] = {key: sum(call["usage"][key] for call in trace)
-                                       for key in ("input_tokens", "output_tokens", "total_tokens")}
+                update["status"] = "success"
             else:
                 update["current_outputs"] = {**state["current_outputs"], node_id: response.content}
             return update
 
         def invoke(state: FixedGraphState):
             messages, spatial, temporal, adapter = prepare(state)
-            return complete(state, messages, spatial, temporal, adapter.invoke(messages))
+            started_at, started = datetime.now(timezone.utc).isoformat(), perf_counter()
+            try:
+                response = adapter.invoke(messages)
+            except Exception as error:
+                return complete(state, messages, spatial, temporal, adapter, started_at, started, error=error)
+            return complete(state, messages, spatial, temporal, adapter, started_at, started, response=response)
 
         async def ainvoke(state: FixedGraphState):
             messages, spatial, temporal, adapter = prepare(state)
-            return complete(state, messages, spatial, temporal, await adapter.ainvoke(messages))
+            started_at, started = datetime.now(timezone.utc).isoformat(), perf_counter()
+            try:
+                response = await adapter.ainvoke(messages)
+            except Exception as error:
+                return complete(state, messages, spatial, temporal, adapter, started_at, started, error=error)
+            return complete(state, messages, spatial, temporal, adapter, started_at, started, response=response)
 
         return RunnableLambda(invoke, afunc=ainvoke)
 
@@ -195,13 +247,23 @@ def build_offline_fixed_graph(config: OfflineFixedGraphConfig):
         for node_id in topology["execution_order"]:
             name = f"round_{round_index + 1}_{node_id}"
             builder.add_node(name, make_call_node(round_index, node_id))
-            builder.add_edge(previous, name)
+            if previous.startswith("round_"):
+                builder.add_conditional_edges(previous, lambda state: state["status"] == "failed",
+                                              {True: END, False: name})
+            else:
+                builder.add_edge(previous, name)
             previous = name
         name = f"commit_round_{round_index + 1}"
         builder.add_node(name, commit_round)
-        builder.add_edge(previous, name)
+        builder.add_conditional_edges(previous, lambda state: state["status"] == "failed",
+                                      {True: END, False: name})
         previous = name
     builder.add_node("final", make_call_node(1, "final"))
     builder.add_edge(previous, "final")
     builder.add_edge("final", END)
     return builder.compile()
+
+
+def build_offline_fixed_graph(config: OfflineFixedGraphConfig):
+    """保留原离线入口，共用可注入模型的执行流程。"""
+    return build_fixed_graph(config)
