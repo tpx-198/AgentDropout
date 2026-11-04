@@ -125,6 +125,7 @@ class FixedGraphState(FixedGraphInput, total=False):
     status: str
     known_usage: dict
     usage_complete: bool
+    setup_error: dict | None
 
 
 def build_fixed_graph(
@@ -164,7 +165,7 @@ def build_fixed_graph(
         return {"current_outputs": {}, "previous_outputs": {}, "round_outputs": [],
                 "trace": [], "answer": "", "usage": None, "model_calls": 0, "real_api_calls": 0,
                 "status": "running", "known_usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-                "usage_complete": False}
+                "usage_complete": False, "setup_error": None}
 
     def visible(outputs, edges, target):
         return {source: {"role": AGENTS[source], "output": outputs[source]}
@@ -227,7 +228,10 @@ def build_fixed_graph(
             return update
 
         def invoke(state: FixedGraphState):
-            messages, spatial, temporal, adapter = prepare(state)
+            try:
+                messages, spatial, temporal, adapter = prepare(state)
+            except Exception as error:
+                return {"status": "failed", "setup_error": {"type": type(error).__name__, "message": "消息或模型初始化失败"}}
             started_at, started = datetime.now(timezone.utc).isoformat(), perf_counter()
             try:
                 response = adapter.invoke(messages)
@@ -236,7 +240,10 @@ def build_fixed_graph(
             return complete(state, messages, spatial, temporal, adapter, started_at, started, response=response)
 
         async def ainvoke(state: FixedGraphState):
-            messages, spatial, temporal, adapter = prepare(state)
+            try:
+                messages, spatial, temporal, adapter = prepare(state)
+            except Exception as error:
+                return {"status": "failed", "setup_error": {"type": type(error).__name__, "message": "消息或模型初始化失败"}}
             started_at, started = datetime.now(timezone.utc).isoformat(), perf_counter()
             try:
                 response = await adapter.ainvoke(messages)

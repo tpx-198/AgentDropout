@@ -94,6 +94,7 @@ def main():
         "round_outputs": state["round_outputs"], "trace": state["trace"],
         "answer": state["answer"], "usage": state["usage"],
         "status": state["status"], "known_usage": state["known_usage"],
+        "setup_error": state.get("setup_error"),
         "usage_complete": state["usage_complete"],
         "usage_source": "mock_not_measured" if args.backend == "mock" else (
             "provider" if state["usage_complete"] else "provider_incomplete"),

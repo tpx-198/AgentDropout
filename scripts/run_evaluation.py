@@ -29,7 +29,9 @@ def main():
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--split", choices=["train", "test"], default="test")
-    parser.add_argument("--baseline", choices=["single", "fixed", "both"], default="both")
+    parser.add_argument("--baseline", choices=["single", "fixed", "both", "learned", "all"], default="both")
+    parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument("--learned-mode", choices=["sampled", "original-fixed"], default="sampled")
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data/gsm8k")
     parser.add_argument("--config", type=Path, default=ROOT / "configs/fixed_graph_offline.json")
     parser.add_argument("--output-dir", type=Path)
@@ -45,9 +47,31 @@ def main():
         config = load_fixed_graph_config(args.config)
     except (OSError, ValueError) as error:
         parser.error(f"{error}；数据准备：python scripts/prepare_gsm8k.py")
-    baselines = ("single", "fixed") if args.baseline == "both" else (args.baseline,)
+    baselines = (("single", "fixed", "learned") if args.baseline == "all" or (args.baseline == "both" and args.checkpoint)
+                 else ("single", "fixed") if args.baseline == "both" else (args.baseline,))
+    learned_policy, learned_generator, checkpoint_info = None, None, None
+    learned_temperature = 1.0
+    if "learned" in baselines:
+        if args.checkpoint is None or args.split != "test":
+            parser.error("学习后评测需要 --checkpoint，且只允许 test 划分")
+        import torch
+        from ad_l.training import load_training_checkpoint, policy_from_checkpoint
+        try:
+            checkpoint = load_training_checkpoint(args.checkpoint)
+            if checkpoint["step"] < 1:
+                raise ValueError("检查点尚未完成训练更新")
+            learned_policy = policy_from_checkpoint(checkpoint).eval().requires_grad_(False)
+            learned_generator = torch.Generator().manual_seed(args.seed)
+            learned_temperature = checkpoint["context"]["hyperparameters"]["temperature"]
+            checkpoint_info = {"path": str(args.checkpoint.resolve()), "sha256": hashlib.sha256(args.checkpoint.read_bytes()).hexdigest(),
+                               "step": checkpoint["step"], "training_dataset": checkpoint["context"]["dataset"],
+                               "training_settings": checkpoint["context"]["settings"], "mode": args.learned_mode}
+        except (OSError, ValueError, KeyError) as error:
+            parser.error(str(error))
+    elif args.checkpoint is not None:
+        parser.error("指定检查点时请选择 learned、all 或默认的 both")
     calls = args.limit * sum(1 if baseline == "single" else 5 for baseline in baselines)
-    plan = {"dataset": dataset, "sample_ids": [sample.sample_id for sample in samples],
+    plan = {"dataset": dataset, "sample_ids": [sample.sample_id for sample in samples], "checkpoint": checkpoint_info,
             "seed": args.seed, "baselines": baselines, "planned_model_calls": calls,
             "planned_real_api_calls": calls if args.deepseek else 0}
     if args.plan:
@@ -95,7 +119,9 @@ def main():
         parser.error("output-dir 已存在，请选择新目录；不会覆盖既有评测")
     print(f"计划：{args.split} {len(samples)} 题，最多 {calls} 次模型调用；真实后端：{args.deepseek}")
     report = run_baselines(samples, config, settings, output, manifest, baselines=baselines,
-                           allow_real_api=args.deepseek, adapter_factory=factory)
+                           allow_real_api=args.deepseek, adapter_factory=factory,
+                           learned_policy=learned_policy, learned_generator=learned_generator,
+                           learned_mode=args.learned_mode, learned_temperature=learned_temperature)
     print(json.dumps(report["summary"], ensure_ascii=False, indent=2))
     print(f"评测记录：{output.resolve()}")
     if report["status"] != "success":

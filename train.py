@@ -1,4 +1,4 @@
-"""离线拓扑学习快捷入口：只执行一次更新。"""
+"""GSM8K 多步拓扑学习快捷入口，默认模拟。"""
 
 from scripts.train_topology import main
 

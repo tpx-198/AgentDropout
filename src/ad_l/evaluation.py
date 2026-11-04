@@ -94,9 +94,15 @@ def write_json(path, value):
 
 
 def run_baselines(samples, config, settings, output_dir: Path, manifest: dict, *,
-                  baselines=("single", "fixed"), allow_real_api=False, adapter_factory=None):
-    if not samples or not baselines or len(set(baselines)) != len(baselines) or set(baselines) - {"single", "fixed"}:
+                  baselines=("single", "fixed"), allow_real_api=False, adapter_factory=None,
+                  learned_policy=None, learned_generator=None, learned_mode="sampled", learned_temperature=1.0):
+    if not samples or not baselines or len(set(baselines)) != len(baselines) or set(baselines) - {"single", "fixed", "learned"}:
         raise ValueError("需要非空样本和 single/fixed 基线")
+    if "learned" in baselines:
+        if learned_policy is None or learned_generator is None or any(sample.split != "test" for sample in samples):
+            raise ValueError("学习后评测需要冻结策略、独立随机数生成器和 test 样本")
+        if learned_mode not in {"sampled", "original-fixed"}:
+            raise ValueError("未知学习后推理模式")
     if settings.backend != "mock" and not allow_real_api:
         raise ValueError("真实批量请求需要显式启用")
     if settings.max_retries != 0:
@@ -119,13 +125,30 @@ def run_baselines(samples, config, settings, output_dir: Path, manifest: dict, *
             for sample in samples:
                 for baseline in baselines:
                     started = perf_counter()
+                    sampled_rounds = None
                     try:
                         if baseline == "single":
                             adapter = make_adapter()
                         else:
                             adapters = None if settings.backend == "mock" and adapter_factory is None else {
                                 node: make_adapter() for node in ("A", "B", "final")}
-                            graph = build_fixed_graph(config, adapters, allow_real_api=allow_real_api)
+                            active_config = config
+                            round_topologies = None
+                            if baseline == "learned":
+                                import torch
+                                from dataclasses import replace
+                                learned_policy.eval()
+                                with torch.no_grad():
+                                    if learned_mode == "sampled":
+                                        sampled_rounds = learned_policy.sample_rounds(
+                                            temperature=learned_temperature, generator=learned_generator)
+                                        round_topologies = [item.for_execution() for item in sampled_rounds]
+                                    else:
+                                        active_config = replace(config,
+                                            spatial_masks=tuple(tuple(int(v) for v in row) for row in learned_policy.spatial_masks.tolist()),
+                                            temporal_masks=tuple(tuple(int(v) for v in row) for row in learned_policy.temporal_masks.tolist()))
+                            graph = build_fixed_graph(active_config, adapters, allow_real_api=allow_real_api,
+                                                      round_topologies=round_topologies)
                     except Exception as error:
                         state = {"status": "failed", "answer": "", "trace": [], "round_outputs": [],
                                  "model_calls": 0, "real_api_calls": 0,
@@ -139,6 +162,8 @@ def run_baselines(samples, config, settings, output_dir: Path, manifest: dict, *
                            "trace": state["trace"], "round_outputs": state["round_outputs"],
                            "model_calls": state["model_calls"], "real_api_calls": state["real_api_calls"],
                            "setup_error": state.get("setup_error"),
+                           "learned_mode": learned_mode if baseline == "learned" else None,
+                           "sampled_rounds": [item.for_report() for item in sampled_rounds] if sampled_rounds is not None else None,
                            "elapsed_seconds": perf_counter() - started,
                            **score_answer(state["answer"], sample.target, state["status"])}
                     rows.append(row)

@@ -1,78 +1,120 @@
-"""只做一次离线拓扑更新，不读取密钥，不发送模型请求。"""
+"""GSM8K train 多步训练；默认模拟，显式 --deepseek 才请求真实模型。"""
 
 import argparse
 import hashlib
 import importlib.metadata as metadata
+import json
 import math
+import os
 import platform
-import subprocess
 import sys
-from datetime import datetime, timezone
+from dataclasses import asdict
 from pathlib import Path
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-import torch
-
-from ad_l.evaluation import SCORER, write_json
+from ad_l.datasets import load_gsm8k, sample_gsm8k
+from ad_l.evaluation import SCORER
 from ad_l.fixed_graph import load_fixed_graph_config
-from ad_l.topology import TopologyPolicy
-from ad_l.topology_training import offline_training_step
+from ad_l.models import ModelSettings, create_model_adapter
+from ad_l.training import load_training_checkpoint, train_multistep
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--lr", type=float, default=0.1)
-    parser.add_argument("--initial-probability", type=float, default=0.5)
-    parser.add_argument("--temperature", type=float, default=1.0)
-    parser.add_argument("--delta", type=float, default=0.1)
+    parser.add_argument("--steps", type=int, help="目标总步数；新训练默认 3，续训默认再走 1 步")
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--limit", type=int, help="训练样本池大小，默认完整训练集")
+    parser.add_argument("--seed", type=int)
+    parser.add_argument("--lr", type=float)
+    parser.add_argument("--initial-probability", type=float)
+    parser.add_argument("--temperature", type=float, help="拓扑采样温度")
+    parser.add_argument("--delta", type=float)
+    parser.add_argument("--resume", type=Path)
+    parser.add_argument("--deepseek", action="store_true", help="允许真实训练，每步最多 batch-size × 5 次调用")
+    parser.add_argument("--plan", action="store_true")
+    parser.add_argument("--model")
+    parser.add_argument("--model-temperature", type=float)
+    parser.add_argument("--max-tokens", type=int)
+    parser.add_argument("--timeout", type=float)
+    parser.add_argument("--data-dir", type=Path, default=ROOT / "data/gsm8k")
     parser.add_argument("--config", type=Path, default=ROOT / "configs/fixed_graph_offline.json")
     parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args()
-    if not math.isfinite(args.lr) or args.lr <= 0:
-        parser.error("lr 必须是有限正数")
     try:
+        checkpoint = load_training_checkpoint(args.resume) if args.resume else None
+        old = checkpoint["context"] if checkpoint else {}
+        defaults = {"seed": 0, "lr": 0.1, "batch_size": 2, "initial_probability": 0.5,
+                    "temperature": 1.0, "delta": 0.1, "limit": None}
+        hp = {}
+        for name, default in defaults.items():
+            value = getattr(args, name)
+            saved = old.get("hyperparameters", {}).get(name, default)
+            if checkpoint and value is not None and value != saved:
+                raise ValueError(f"续训不能更改 {name}")
+            hp[name] = saved if value is None else value
+        if (hp["batch_size"] < 1 or not math.isfinite(hp["lr"]) or hp["lr"] <= 0
+                or not math.isfinite(hp["initial_probability"]) or not 0 < hp["initial_probability"] < 1
+                or not math.isfinite(hp["temperature"]) or hp["temperature"] <= 0
+                or not math.isfinite(hp["delta"]) or hp["delta"] < 0):
+            raise ValueError("批量、学习率、初始概率、拓扑温度或 delta 不合法")
+        pool, dataset = load_gsm8k(args.data_dir / "train.jsonl", "train", verify_official=True)
+        if hp["limit"] is not None:
+            pool = sample_gsm8k(pool, hp["limit"], hp["seed"])
         config = load_fixed_graph_config(args.config)
-        policy = TopologyPolicy(config.spatial_masks, config.temporal_masks, args.initial_probability)
-        if not math.isfinite(args.temperature) or args.temperature <= 0 or not math.isfinite(args.delta) or args.delta < 0:
-            raise ValueError("temperature 必须是有限正数；delta 必须是有限非负数")
-    except (OSError, ValueError) as error:
+        start = checkpoint["step"] if checkpoint else 0
+        steps = args.steps if args.steps is not None else (start + 1 if checkpoint else 3)
+        if steps <= start:
+            raise ValueError("steps 必须大于已完成总步数")
+        backend = "deepseek" if args.deepseek else "mock"
+        if checkpoint and backend != old["settings"]["backend"]:
+            raise ValueError("续训必须使用原后端；真实检查点需显式 --deepseek")
+    except (OSError, ValueError, KeyError) as error:
         parser.error(str(error))
-    run_id = uuid4().hex
-    output = args.output_dir or ROOT / "results/topology" / run_id
-    if output.exists():
-        parser.error("output-dir 已存在，请使用新目录")
-    generator = torch.Generator(device="cpu").manual_seed(args.seed)
-    optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr)
-    examples = [{"sample_id": "synthetic_train:apples:0", "task": "Anna has 3 apples and buys 2 more. How many apples does she have?", "target": "5"}]
-    report = offline_training_step(policy, optimizer, config, examples,
-                                   generator=generator, temperature=args.temperature, delta=args.delta)
-    source_files = [ROOT / f"src/ad_l/{name}.py" for name in ("communication", "topology", "topology_training", "fixed_graph", "models", "prompts", "evaluation")]
-    report.update({"schema_version": 1, "run_id": run_id, "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-                   "backend": "mock", "data_split": "synthetic_train", "training_steps": 1,
-                   "seed": args.seed, "provider_seed": None, "optimizer": "Adam", "lr": args.lr,
-                   "initial_probability": args.initial_probability, "temperature": args.temperature,
-                   "delta": args.delta, "scorer": SCORER, "diff": False,
-                   "spatial_masks": policy.spatial_masks.tolist(), "temporal_masks": policy.temporal_masks.tolist(),
-                   "config": config.to_dict(), "python": platform.python_version(),
-                   "versions": {name: metadata.version(name) for name in ("torch", "langgraph", "langchain-core")},
-                   "code_sha256": {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest() for path in source_files},
-                   "git_commit": subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip()})
-    output.mkdir(parents=True)
-    write_json(output / "training.json", report)
-    # 仅保存已脱离计算图的参数、优化器状态和 RNG 状态；不保存采样 log_prob。
-    torch.save({"schema_version": 1, "step": 1,
-                "model_state_dict": {name: value.detach().clone() for name, value in policy.state_dict().items()},
-                "optimizer_state_dict": optimizer.state_dict(), "generator_state": generator.get_state(),
-                "seed": args.seed, "temperature": args.temperature, "delta": args.delta,
-                "initial_probability": args.initial_probability, "lr": args.lr}, output / "checkpoint.pt")
-    print(f"离线训练更新：1；奖励：{report['rewards']}；损失：{report['loss']:.6f}")
-    print(f"log_prob 保留计算图：{report['sampling_log_prob_requires_grad']}；参数已更新：{report['parameters_changed']}")
-    print(f"模型调用：{report['model_calls']} 次模拟；真实请求：0")
+    calls = (steps - start) * hp["batch_size"] * 5
+    if args.plan:
+        print(json.dumps({"split": "train", "pool_size": len(pool), "step_start": start,
+                          "target_steps": steps, "batch_size": hp["batch_size"],
+                          "planned_model_calls": calls, "planned_real_api_calls": calls if args.deepseek else 0}, indent=2))
+        return
+    factory = None
+    settings = ModelSettings()
+    if not args.deepseek and any(value is not None for value in (args.model, args.model_temperature, args.max_tokens, args.timeout)):
+        parser.error("模型参数需要 --deepseek")
+    if args.deepseek:
+        from dotenv import load_dotenv
+        load_dotenv(ROOT / ".env", override=False)
+        previous = old.get("settings", {})
+        try:
+            settings = ModelSettings(backend="deepseek", model=args.model or previous.get("model") or os.getenv("DEEPSEEK_MODEL", ""),
+                temperature=args.model_temperature if args.model_temperature is not None else previous.get("temperature"),
+                max_tokens=args.max_tokens if args.max_tokens is not None else previous.get("max_tokens"),
+                timeout=args.timeout if args.timeout is not None else previous.get("timeout", 60.0), max_retries=0)
+            adapter = create_model_adapter(settings, allow_real_api=True)
+        except ValueError as error:
+            parser.error(str(error))
+        except Exception as error:
+            parser.error(f"模型初始化失败：{type(error).__name__}")
+        factory = lambda: adapter
+    sources = [*sorted((ROOT / "src/ad_l").glob("*.py")),
+               *sorted((ROOT / "src/ad_l/resources/prompts").glob("*.json"))]
+    context = {"dataset": dataset, "pool_sample_ids": [sample.sample_id for sample in pool],
+               "hyperparameters": hp, "settings": asdict(settings), "config": config.to_dict(),
+               "scorer": SCORER, "diff": False, "python": platform.python_version(),
+               "versions": {name: metadata.version(name) for name in ("torch", "langgraph", "langchain-core", "langchain-deepseek")},
+               "code_sha256": {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest() for path in sources}}
+    output = args.output_dir or ROOT / "results/topology" / uuid4().hex
+    try:
+        report = train_multistep(pool, config, settings, context, output, steps, checkpoint=checkpoint,
+                                adapter_factory=factory, allow_real_api=args.deepseek)
+    except (ValueError, FileExistsError) as error:
+        parser.error(str(error))
+    print(f"完成总步数：{report['completed_steps']}；本次真实请求尝试：{report['real_api_calls']}")
     print(f"训练记录：{output.resolve()}")
+    if report["status"] != "success":
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

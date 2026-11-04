@@ -49,6 +49,8 @@ python evaluate.py --deepseek --limit 10
 
 可选参数：`--baseline single|fixed|both`（默认 both）、`--split train|test`（默认 test）、`--seed`、`--limit`、`--model`、`--temperature`、`--max-tokens`、`--timeout`、`--config`、`--output-dir`。输出目录必须尚不存在，避免覆盖既有实验。默认目录为 `results/gsm8k/<run_id>/`。
 
+已增加学习后拓扑：指定 `--checkpoint` 后，默认比较 single、fixed、learned 三组；也可用 `--baseline learned` 或 `--baseline all`。此时只允许 test 划分，默认使用冻结参数的采样推理，三组每题最多 11 次模型调用。`--learned-mode original-fixed` 可核对原 mask 固定推理规则。详见 [训练、续训与学习后评测](topology-training.md)。
+
 训练集用于后续优化，测试集用于评测。当前尚无训练过程；选择 `--split train` 只评测训练划分，结果会明确标记 train，不作为测试集结果。
 
 ## 两组基线与判分
