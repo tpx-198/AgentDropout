@@ -14,6 +14,7 @@ from typing_extensions import TypedDict
 
 from ad_l.models import ModelAdapter, ModelSettings, create_model_adapter
 from ad_l.prompts import build_final_refer_messages, build_math_agent_messages
+from ad_l.communication import execution_topology
 
 AGENTS = {"A": "Math Solver", "B": "Mathematical Analyst"}
 
@@ -131,6 +132,7 @@ def build_fixed_graph(
     adapters: Mapping[str, ModelAdapter] | None = None,
     *,
     allow_real_api: bool = False,
+    round_topologies: list[dict] | None = None,
 ):
     """adapters 的键为 A、B、final；省略时按原预设响应离线运行。"""
     adapters = dict(adapters) if adapters is not None else None
@@ -144,7 +146,16 @@ def build_fixed_graph(
                 raise ValueError("真实模型请求需显式设置 allow_real_api=True")
             if adapter.settings.max_retries != 0:
                 raise ValueError("固定图当前要求 max_retries=0，以明确记录每次调用尝试")
-    topology = resolve_fixed_topology(config)
+    if round_topologies is None:
+        topology = resolve_fixed_topology(config)
+        topologies = [topology, topology]
+    else:
+        if len(round_topologies) != 2:
+            raise ValueError("必须提供两轮普通连接数据")
+        topologies = [execution_topology(item["spatial_edges"], item["temporal_edges"])
+                      for item in round_topologies]
+        if topologies[0]["temporal_edges"]:
+            raise ValueError("第一轮不能有时间边")
 
     def initialize(state: FixedGraphInput):
         task = state.get("task")
@@ -163,6 +174,7 @@ def build_fixed_graph(
         final = node_id == "final"
 
         def prepare(state):
+            topology = topologies[round_index]
             if final:
                 spatial = {source: {"role": role, "output": state["previous_outputs"][source]}
                            for source, role in AGENTS.items()}
@@ -244,7 +256,7 @@ def build_fixed_graph(
     builder.add_edge(START, "initialize")
     previous = "initialize"
     for round_index in range(2):
-        for node_id in topology["execution_order"]:
+        for node_id in topologies[round_index]["execution_order"]:
             name = f"round_{round_index + 1}_{node_id}"
             builder.add_node(name, make_call_node(round_index, node_id))
             if previous.startswith("round_"):

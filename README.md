@@ -7,7 +7,7 @@
 - 项目目录：`/Users/tpx-198/code/AD-L`。
 - Conda 环境：`ad-l`，由 `agentdropout` 克隆后安装新框架依赖。
 - 原项目 `/Users/tpx-198/code/AgentDropout` 作为只读参考与实验对照。
-- 已完成模型适配器、GSM8K Math Solver 单轮流程，以及两个智能体、两轮固定通信图和 FinalRefer 最终汇总的离线版本；拓扑学习与剪枝训练尚未迁移。
+- 已完成模型适配器、单智能体、两轮固定图与最终汇总、GSM8K 批量评测，以及共享拓扑参数的边采样和一次离线训练更新；剪枝与完整训练实验待后续迁移。
 
 ## 安装与环境
 
@@ -59,6 +59,31 @@ python run.py --deepseek
 
 每份结果包含逐次调用的完整消息、轮内／跨轮可见输入、每轮输出、最终回答、配置矩阵和实际生效连接。原项目的固定时间边也受空间环路检查限制，本版保留该行为。具体可见性与迁移验证见 [固定图说明](docs/fixed-graph.md)。
 
+## GSM8K 批量评测
+
+数据准备与离线检查：
+
+```bash
+python scripts/prepare_gsm8k.py
+python evaluate.py
+```
+
+默认在测试集中固定抽取 10 题，对比单智能体与两轮固定图；模拟结果仅用于流程诊断。真实批量评测使用：
+
+```bash
+python evaluate.py --deepseek --limit 10
+```
+
+该命令使用 `.env` 中的 DeepSeek 配置，最多产生 60 次真实调用；添加 `--plan` 可只查看调用计划。结果自动保存到 `results/gsm8k/`，包含逐题记录与汇总。数据来源、判分规则和指标说明见 [GSM8K 批量评测](docs/gsm8k-evaluation.md)。
+
+## 一次离线拓扑训练
+
+```bash
+python train.py
+```
+
+用合成题完成两轮边采样、模拟执行、奖励判分和一次 Adam 更新。默认损失保留原 GSM8K 主循环中的策略梯度与正则项。采样 `log_prob` 在 PyTorch 侧保留计算图，执行侧仅接收普通连接数据；结果和参数检查点自动保存到 `results/topology/`。此命令不调用真实模型，结果只验证训练链路。详见 [拓扑学习说明](docs/topology-training.md)。
+
 ## 依赖记录
 
 - [pyproject.toml](pyproject.toml)：项目依赖与版本约束的统一声明，包括 LangChain、LangGraph、PyTorch 及原注册组件的兼容依赖；通过 `pip install -e .` 安装。
@@ -77,8 +102,8 @@ python run.py --deepseek
 
 ## 下一步
 
-1. 扩展固定图规模与其余角色，按授权范围建立真实模型基线。
-2. 接回 PyTorch 拓扑学习和节点、边剪枝，保存训练检查点。
+1. 按明确的样本规模运行真实 GSM8K 基线，扩展固定图规模与其余角色。
+2. 在已验证的一次离线更新基础上扩展训练与评测，迁移节点、边剪枝及逐轮独立拓扑参数。
 3. 在一致评测条件下与原项目比较正确率、Token、耗时。
 
 需要真实 API 时，将 `.env.example` 复制为 `.env` 并填写配置；运行入口仅在显式选择真实后端后加载该文件。未复制原项目密钥。
