@@ -19,7 +19,7 @@ from ad_l.datasets import load_gsm8k, sample_gsm8k
 from ad_l.evaluation import SCORER
 from ad_l.fixed_graph import load_fixed_graph_config
 from ad_l.models import ModelSettings, create_model_adapter
-from ad_l.training import load_training_checkpoint, train_multistep
+from ad_l.training import load_training_checkpoint, train_multistep, pruning_schedule, pruning_due
 
 
 def main():
@@ -32,7 +32,12 @@ def main():
     parser.add_argument("--initial-probability", type=float)
     parser.add_argument("--temperature", type=float, help="拓扑采样温度")
     parser.add_argument("--delta", type=float)
+    parser.add_argument("--prune-every", type=int, help="每 N 个成功更新步后剪枝；默认 0 表示关闭")
+    parser.add_argument("--prune-rate", type=float, help="每次剪枝比例，默认 0.25")
+    parser.add_argument("--prune-until", type=int, help="允许剪枝的最后一个绝对训练步（含）")
     parser.add_argument("--resume", type=Path)
+    parser.add_argument("--diff", action=argparse.BooleanOptionalAction, default=None,
+                        help="每轮独立拓扑参数；默认共享，续训自动继承")
     parser.add_argument("--deepseek", action="store_true", help="允许真实训练，每步最多 batch-size × 5 次调用")
     parser.add_argument("--plan", action="store_true")
     parser.add_argument("--model")
@@ -46,8 +51,12 @@ def main():
     try:
         checkpoint = load_training_checkpoint(args.resume) if args.resume else None
         old = checkpoint["context"] if checkpoint else {}
+        diff = old.get("diff", False) if args.diff is None else args.diff
+        if checkpoint and diff != old.get("diff", False):
+            raise ValueError("续训不能切换 diff 参数模式")
         defaults = {"seed": 0, "lr": 0.1, "batch_size": 2, "initial_probability": 0.5,
-                    "temperature": 1.0, "delta": 0.1, "limit": None}
+                    "temperature": 1.0, "delta": 0.1, "limit": None,
+                    "prune_every": 0, "prune_rate": 0.25, "prune_until": None}
         hp = {}
         for name, default in defaults.items():
             value = getattr(args, name)
@@ -55,6 +64,7 @@ def main():
             if checkpoint and value is not None and value != saved:
                 raise ValueError(f"续训不能更改 {name}")
             hp[name] = saved if value is None else value
+        schedule = pruning_schedule({"hyperparameters": hp})
         if (hp["batch_size"] < 1 or not math.isfinite(hp["lr"]) or hp["lr"] <= 0
                 or not math.isfinite(hp["initial_probability"]) or not 0 < hp["initial_probability"] < 1
                 or not math.isfinite(hp["temperature"]) or hp["temperature"] <= 0
@@ -71,12 +81,17 @@ def main():
         backend = "deepseek" if args.deepseek else "mock"
         if checkpoint and backend != old["settings"]["backend"]:
             raise ValueError("续训必须使用原后端；真实检查点需显式 --deepseek")
+        if checkpoint and checkpoint.get("evaluation_only"):
+            raise ValueError("独立剪枝检查点仅供评测；周期训练应从训练检查点续训")
     except (OSError, ValueError, KeyError) as error:
         parser.error(str(error))
     calls = (steps - start) * hp["batch_size"] * 5
     if args.plan:
         print(json.dumps({"split": "train", "pool_size": len(pool), "step_start": start,
                           "target_steps": steps, "batch_size": hp["batch_size"],
+                          "diff": diff,
+                          "pruning_schedule": schedule,
+                          "pruning_steps_this_run": [step for step in range(start + 1, steps + 1) if pruning_due(step, schedule)],
                           "planned_model_calls": calls, "planned_real_api_calls": calls if args.deepseek else 0}, indent=2))
         return
     factory = None
@@ -102,7 +117,7 @@ def main():
                *sorted((ROOT / "src/ad_l/resources/prompts").glob("*.json"))]
     context = {"dataset": dataset, "pool_sample_ids": [sample.sample_id for sample in pool],
                "hyperparameters": hp, "settings": asdict(settings), "config": config.to_dict(),
-               "scorer": SCORER, "diff": False, "python": platform.python_version(),
+               "scorer": SCORER, "diff": diff, "python": platform.python_version(),
                "versions": {name: metadata.version(name) for name in ("torch", "langgraph", "langchain-core", "langchain-deepseek")},
                "code_sha256": {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest() for path in sources}}
     output = args.output_dir or ROOT / "results/topology" / uuid4().hex

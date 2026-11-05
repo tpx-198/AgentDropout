@@ -65,7 +65,8 @@ def main():
             learned_temperature = checkpoint["context"]["hyperparameters"]["temperature"]
             checkpoint_info = {"path": str(args.checkpoint.resolve()), "sha256": hashlib.sha256(args.checkpoint.read_bytes()).hexdigest(),
                                "step": checkpoint["step"], "training_dataset": checkpoint["context"]["dataset"],
-                               "training_settings": checkpoint["context"]["settings"], "mode": args.learned_mode}
+                               "training_settings": checkpoint["context"]["settings"], "mode": args.learned_mode,
+                               "diff": learned_policy.diff}
         except (OSError, ValueError, KeyError) as error:
             parser.error(str(error))
     elif args.checkpoint is not None:

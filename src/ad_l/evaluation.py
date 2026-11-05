@@ -152,10 +152,15 @@ def run_baselines(samples, config, settings, output_dir: Path, manifest: dict, *
                                             temperature=learned_temperature, generator=learned_generator)
                                         round_topologies = [item.for_execution() for item in sampled_rounds]
                                     else:
-                                        active_config = replace(config,
-                                            spatial_masks=tuple(tuple(int(v) for v in row) for row in policy.spatial_masks.tolist()),
-                                            temporal_masks=tuple(tuple(int(v) for v in row) for row in policy.temporal_masks.tolist()))
-                            effective_topology = resolve_fixed_topology(active_config) if round_topologies is None else None
+                                        if policy.diff:
+                                            round_topologies = policy.fixed_round_topologies(config)
+                                            effective_topology = round_topologies
+                                        else:
+                                            active_config = replace(config,
+                                                spatial_masks=tuple(tuple(int(v) for v in row) for row in policy.spatial_masks.tolist()),
+                                                temporal_masks=tuple(tuple(int(v) for v in row) for row in policy.temporal_masks.tolist()))
+                            if round_topologies is None:
+                                effective_topology = resolve_fixed_topology(active_config)
                             graph = build_fixed_graph(active_config, adapters, allow_real_api=allow_real_api,
                                                       round_topologies=round_topologies)
                     except Exception as error:

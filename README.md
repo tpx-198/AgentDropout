@@ -7,7 +7,7 @@
 - 项目目录：`/Users/tpx-198/code/AD-L`。
 - Conda 环境：`ad-l`，由 `agentdropout` 克隆后安装新框架依赖。
 - 原项目 `/Users/tpx-198/code/AgentDropout` 作为只读参考与实验对照。
-- 已完成模型适配器、固定图、GSM8K 批量基线、多步拓扑训练与恢复、学习后评测，以及独立边剪枝和剪枝前后配对评测；节点剪枝与逐轮独立参数待后续迁移。
+- 已完成模型适配器、固定图、GSM8K 批量基线、多步拓扑训练与恢复、学习后评测、独立边剪枝与配对评测，以及训练中的周期边剪枝；节点剪枝与逐轮独立参数待后续迁移。
 
 ## 安装与环境
 
@@ -87,6 +87,24 @@ python evaluate.py --checkpoint results/topology/gsm8k-demo/checkpoint.pt --limi
 
 ## 边剪枝与配对评测
 
+训练中周期剪枝可直接使用：
+
+```bash
+python train.py --steps 6 --prune-every 2 --prune-until 4
+```
+
+默认模拟，在第 2、4 步更新后剪枝，其余步继续训练；检查点保存剪枝进度，恢复时不重复或漏剪。详见 [周期剪枝与恢复](docs/topology-training.md)。
+
+需要每轮学习各自的通信拓扑时，添加 `--diff`：
+
+```bash
+python train.py --diff --steps 6 --prune-every 2 --prune-until 4
+```
+
+两轮空间参数与跨轮时间参数独立，周期剪枝也按每张矩阵分别执行。续训自动继承模式，现有评测、独立剪枝入口自动识别检查点。仍为两个智能体、两轮、每题 5 次调用；节点剪枝尚待迁移。另已修正正则约束的参考矩阵，使剪枝前后始终参照初始配置，与原脚本一致。详见 [每轮独立拓扑](docs/topology-training.md)。
+
+已有检查点的独立剪枝和配对评测：
+
 ```bash
 python prune.py --checkpoint results/topology/gsm8k-demo/checkpoint.pt
 ```
@@ -112,7 +130,7 @@ python prune.py --checkpoint results/topology/gsm8k-demo/checkpoint.pt
 ## 下一步
 
 1. 按明确的样本规模运行真实 GSM8K 基线，扩展固定图规模与其余角色。
-2. 在独立边剪枝基础上迁移周期性训练剪枝、节点剪枝及逐轮独立拓扑参数。
+2. 在逐轮独立参数与周期边剪枝基础上，迁移节点选择权重训练、节点剪枝与跳过执行。
 3. 在一致评测条件下与原项目比较正确率、Token、耗时。
 
 需要真实 API 时，将 `.env.example` 复制为 `.env` 并填写配置；运行入口仅在显式选择真实后端后加载该文件。未复制原项目密钥。

@@ -1,4 +1,4 @@
-"""原 diff=False 边剪枝规则、来源校验与配对指标。"""
+"""原共享／逐轮独立边剪枝规则、来源校验与配对指标。"""
 
 import copy
 import math
@@ -13,6 +13,8 @@ RULE = "agentdropout_update_masks_v1"
 
 
 def fixed_execution(policy, config):
+    if policy.diff:
+        return policy.fixed_round_topologies(config)
     return resolve_fixed_topology(replace(config,
         spatial_masks=tuple(tuple(int(value) for value in row) for row in policy.spatial_masks.tolist()),
         temporal_masks=tuple(tuple(int(value) for value in row) for row in policy.temporal_masks.tolist())))
@@ -28,27 +30,52 @@ def prune_edges(policy, rate=0.25):
         logits = getattr(policy, kind + "_logits")
         if not torch.isfinite(logits).all():
             raise ValueError("不能按非有限权重剪枝")
-        before = mask.clone()
-        flat_mask = mask.view(-1)
-        active = (flat_mask > 0).sum()
-        disabled = (flat_mask == 0).sum()
-        requested = max(int(torch.round(active * rate).item()), 1)
-        ranked = logits.detach().flatten().clone()
-        ranked[flat_mask == 0] = ranked.min() - 1.0
-        indices = torch.argsort(ranked)[:requested + int(disabled.item())]
-        flat_mask[indices] = 0
-        removed = []
-        for index in range(flat_mask.numel()):
-            i, j = divmod(index, 2)
-            if before[i, j] == 1 and mask[i, j] == 0:
-                removed.append({"source": ("A", "B")[i], "target": ("A", "B")[j],
-                                "logit": logits[i, j].item()})
-        count = int(active.item())
-        records[kind] = {"before_mask": before.tolist(), "after_mask": mask.tolist(),
-                         "active_before": count, "active_after": int(mask.sum().item()),
-                         "requested_remove": requested, "actual_removed": len(removed),
-                         "actual_rate": len(removed) / count if count else None, "removed_edges": removed}
-    return {"rule": RULE, "rate": rate, "changes": records}
+        if policy.diff:
+            matrices = [_prune_matrix(mask[i], logits[i], rate) for i in range(len(mask))]
+            for i, matrix in enumerate(matrices):
+                matrix["round"] = i + (1 if kind == "spatial" else 2)
+            count = sum(item["active_before"] for item in matrices)
+            removed = [{**edge, "round": item["round"]} for item in matrices for edge in item["removed_edges"]]
+            records[kind] = {"matrices": matrices,
+                "before_mask": [item["before_mask"] for item in matrices], "after_mask": mask.tolist(),
+                "active_before": count, "active_after": int(mask.sum().item()),
+                "requested_remove": sum(item["requested_remove"] for item in matrices),
+                "actual_removed": len(removed), "actual_rate": len(removed) / count if count else None,
+                "removed_edges": removed}
+        else:
+            records[kind] = _prune_matrix(mask, logits, rate)
+    return {"rule": "agentdropout_update_masks_diff_v1" if policy.diff else RULE,
+            "rate": rate, "changes": records}
+
+
+def _prune_matrix(mask, logits, rate):
+    """一次排序对应原代码的一张矩阵，不能合并不同轮次排序。"""
+    before = mask.clone()
+    flat_mask = mask.view(-1)
+    active = (flat_mask > 0).sum()
+    disabled = (flat_mask == 0).sum()
+    requested = max(int(torch.round(active * rate).item()), 1)
+    ranked = logits.detach().flatten().clone()
+    ranked[flat_mask == 0] = ranked.min() - 1.0
+    indices = torch.argsort(ranked)[:requested + int(disabled.item())]
+    flat_mask[indices] = 0
+    removed = []
+    for index in range(flat_mask.numel()):
+        i, j = divmod(index, 2)
+        if before[i, j] == 1 and mask[i, j] == 0:
+            removed.append({"source": ("A", "B")[i], "target": ("A", "B")[j],
+                            "logit": logits[i, j].item()})
+    count = int(active.item())
+    return {"before_mask": before.tolist(), "after_mask": mask.tolist(),
+                     "active_before": count, "active_after": int(mask.sum().item()),
+                     "requested_remove": requested, "actual_removed": len(removed),
+                     "actual_rate": len(removed) / count if count else None, "removed_edges": removed}
+
+
+def _effective_edges(topology, kind):
+    if isinstance(topology, list):
+        return {(index + 1, *edge) for index, item in enumerate(topology) for edge in item[kind + "_edges"]}
+    return {tuple(edge) for edge in topology[kind + "_edges"]}
 
 
 def prune_checkpoint(checkpoint, config, rate, *, parent_sha256):
@@ -61,9 +88,8 @@ def prune_checkpoint(checkpoint, config, rate, *, parent_sha256):
                    "effective_before": fixed_execution(before, config),
                    "effective_after": fixed_execution(after, config)})
     for kind in ("spatial", "temporal"):
-        key = kind + "_edges"
-        previous = {tuple(edge) for edge in report["effective_before"][key]}
-        following = {tuple(edge) for edge in report["effective_after"][key]}
+        previous = _effective_edges(report["effective_before"], kind)
+        following = _effective_edges(report["effective_after"], kind)
         report["changes"][kind]["effective_removed"] = [list(edge) for edge in sorted(previous - following)]
         report["changes"][kind]["effective_added"] = [list(edge) for edge in sorted(following - previous)]
     pruned = copy.deepcopy(checkpoint)

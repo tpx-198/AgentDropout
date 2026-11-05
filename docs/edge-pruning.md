@@ -20,7 +20,7 @@ python prune.py --checkpoint results/topology/gsm8k-demo/checkpoint.pt --limit 1
 
 ## 原规则迁移
 
-规则标识为 `agentdropout_update_masks_v1`，对应原项目 `Graph.update_masks` 的共享参数分支，空间／时间矩阵分别处理：
+共享模式规则标识为 `agentdropout_update_masks_v1`，对应原项目 `Graph.update_masks`；逐轮独立模式自动使用 `agentdropout_update_masks_diff_v1`，对应 `Graph.update_masks_diff`。空间／时间的每一张矩阵分别处理：
 
 1. 计算当前 mask>0 的候选数和已禁用数。
 2. 待剪数量为 `max(torch.round(active_count × rate), 1)`。
@@ -28,6 +28,8 @@ python prune.py --checkpoint results/topology/gsm8k-demo/checkpoint.pt --limit 1
 4. 排序结果前“已禁用数＋待剪数”个位置置 mask=0。
 
 只修改 mask，不改变 logit，不做重训练、不新增保连通约束。保留 torch.round 的取整、相同权重排序和 `rate=0` 仍至少尝试剪一条的行为。无剩余候选时实际剪除为 0。报告记录请求比例、待剪数量、实际剪除数量／比例和被剪边。
+
+`python train.py --diff` 生成的检查点同样支持此入口，无须额外参数。每轮单独排序和取整，不将各轮展平后统一剪枝。diff=True 报告在空间／时间汇总下增加 `matrices` 逐矩阵明细；`effective_before`／`effective_after` 为两轮列表，实际新增／删除边写为 `[接收轮次, 来源, 接收者]`。共享模式保留原报告结构。
 
 默认空间候选只有 A→B，一次剪枝可能将其全部移除。mask 候选数不等于实际执行边数：空间环路检查和固定时间边检查还会过滤连接。
 
@@ -48,7 +50,7 @@ python prune.py --checkpoint results/topology/gsm8k-demo/checkpoint.pt --limit 1
 - `evaluation/summary.json`：两组各自的完成、失败、正确率及用量统计。
 - `comparison.json`：配对完整性、正确率差值、Token 差值／节省比例、调用数差值和平均耗时差值。
 
-原检查点不修改，剪枝前后 logit 必须一致，mask 不得重新启用已有禁用项，并核验父文件指纹。剪枝产物可用 `evaluate.py --checkpoint ... --baseline learned --learned-mode original-fixed` 评测；当前标记 `evaluation_only=true`，拒绝直接续训。周期性训练剪枝和相应恢复语义将单独接入。
+原检查点不修改，剪枝前后 logit 必须一致，mask 不得重新启用已有禁用项，并核验父文件指纹。剪枝产物可用 `evaluate.py --checkpoint ... --baseline learned --learned-mode original-fixed` 评测；当前标记 `evaluation_only=true`，拒绝直接续训。训练中的周期剪枝已通过独立计划与事件进度接入，见 [训练说明](topology-training.md)；其可续训检查点与这里的独立剪枝产物分开管理。
 
 ## 配对指标与限制
 

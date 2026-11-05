@@ -59,7 +59,8 @@ def topology_training_step(policy, optimizer, config, examples, *, generator, te
             samples.append(sampled)
     stacked = torch.stack(log_probs)
     policy_loss = -(stacked * stacked.new_tensor(rewards)).mean()
-    regularization = policy.regularization_loss(delta) if include_regularization else policy_loss * 0
+    regularization = policy.regularization_loss(delta, reference_masks=(config.spatial_masks, config.temporal_masks)) \
+        if include_regularization else policy_loss * 0
     loss = policy_loss + regularization
     parameters = list(policy.parameters())
     policy_gradients = torch.autograd.grad(policy_loss, parameters, retain_graph=True)
@@ -78,6 +79,7 @@ def topology_training_step(policy, optimizer, config, examples, *, generator, te
              for key in ("input_tokens", "output_tokens", "total_tokens")}
     complete = all(call["usage"] is not None for call in calls)
     return {"status": "success", "loss_mode": "original_gsm8k_main" if include_regularization else "policy_only_ablation",
+            "diff": policy.diff, "regularization_reference": "initial_config_masks" if include_regularization else None,
             "policy_loss": policy_loss.detach().item(), "regularization_loss": regularization.detach().item(),
             "loss": loss.detach().item(), "rewards": rewards, "episodes": episodes,
             "sampling_log_prob_requires_grad": stacked.requires_grad,

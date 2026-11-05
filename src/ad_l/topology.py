@@ -1,4 +1,4 @@
-"""PyTorch 拓扑参数与原 diff=False 优化分支的逐轮采样。"""
+"""PyTorch 拓扑参数与原共享／逐轮独立分支的采样。"""
 
 import math
 from dataclasses import dataclass
@@ -28,24 +28,32 @@ class SampledRound:
 
 
 class TopologyPolicy(nn.Module):
-    """两节点共享轮次参数；mask=0 不采样，空间边按原顺序逐条拒绝环路。"""
+    """两节点；diff=True 时两轮空间参数、一组跨轮时间参数各自独立。"""
 
-    def __init__(self, spatial_masks, temporal_masks, initial_probability=0.5):
+    def __init__(self, spatial_masks, temporal_masks, initial_probability=0.5, *, diff=False):
         super().__init__()
+        if type(diff) is not bool:
+            raise ValueError("diff 必须是布尔值")
+        self.diff = diff
         if not math.isfinite(initial_probability) or not 0 < initial_probability < 1:
             raise ValueError("initial_probability 必须严格位于 0 和 1 之间")
         for name, masks in [("spatial_masks", spatial_masks), ("temporal_masks", temporal_masks)]:
             tensor = torch.as_tensor(masks, dtype=torch.float32)
-            if tensor.shape != (2, 2) or not torch.all((tensor == 0) | (tensor == 1)):
-                raise ValueError("mask 必须是 2×2 的 0/1 矩阵")
+            shape = ((2 if name == "spatial_masks" else 1), 2, 2) if diff else (2, 2)
+            if diff and tensor.shape == (2, 2):
+                tensor = tensor.expand(shape)
+            if tensor.shape != shape or not torch.all((tensor == 0) | (tensor == 1)):
+                raise ValueError(f"{name} 必须是形状 {shape} 的 0/1 矩阵")
             self.register_buffer(name, tensor.clone())
         initial_logit = math.log(initial_probability / (1 - initial_probability))
-        self.spatial_logits = nn.Parameter(torch.full((2, 2), initial_logit))
-        self.temporal_logits = nn.Parameter(torch.full((2, 2), initial_logit))
+        self.spatial_logits = nn.Parameter(torch.full_like(self.spatial_masks, initial_logit))
+        self.temporal_logits = nn.Parameter(torch.full_like(self.temporal_masks, initial_logit))
 
     def sample_rounds(self, rounds=2, temperature=1.0, *, generator=None):
         if type(rounds) is not int or rounds < 1:
             raise ValueError("rounds 必须是正整数")
+        if self.diff and rounds != 2:
+            raise ValueError("逐轮独立模式当前只支持两轮")
         if not math.isfinite(temperature) or temperature <= 0:
             raise ValueError("temperature 必须是有限正数")
         if not all(torch.isfinite(parameter).all() for parameter in self.parameters()):
@@ -74,6 +82,9 @@ class TopologyPolicy(nn.Module):
             ]:
                 if kind == "temporal" and round_index == 0:
                     continue
+                if self.diff:
+                    index = round_index if kind == "spatial" else round_index - 1
+                    logits, mask = logits[index], mask[index]
                 for i, source in enumerate(nodes):
                     for j, target in enumerate(nodes):
                         if mask[i, j].item() == 0 or (kind == "spatial" and reaches(target, source)):
@@ -91,11 +102,32 @@ class TopologyPolicy(nn.Module):
                                        torch.stack(terms).sum(), tuple(decisions)))
         return result
 
-    def regularization_loss(self, delta=0.1):
+    def regularization_loss(self, delta=0.1, *, reference_masks=None):
         """原 GSM8K 主训练循环的核范数与 Frobenius 约束。"""
         if not math.isfinite(delta) or delta < 0:
             raise ValueError("delta 必须是有限非负数")
-        return sum(torch.linalg.svdvals(logits).sum()
-                   + F.relu(torch.linalg.matrix_norm(mask - logits, ord="fro") - delta)
-                   for logits, mask in [(self.spatial_logits, self.spatial_masks),
-                                        (self.temporal_logits, self.temporal_masks)])
+        masks = reference_masks or (self.spatial_masks, self.temporal_masks)
+        result = []
+        for logits, mask in zip((self.spatial_logits, self.temporal_logits), masks):
+            mask = torch.as_tensor(mask, dtype=logits.dtype, device=logits.device)
+            # 原 diff=True：分别求各轮均值，再对 Frobenius 均值施加一次阈值。
+            nuclear = torch.linalg.svdvals(logits).sum(dim=-1).mean()
+            frobenius = torch.linalg.matrix_norm(mask - logits, ord="fro").mean()
+            result.append(nuclear + F.relu(frobenius - delta))
+        return sum(result)
+
+    def fixed_round_topologies(self, config):
+        """逐轮复现原非优化建边规则；第一轮没有跨轮输入。"""
+        from dataclasses import replace
+        from ad_l.fixed_graph import resolve_fixed_topology
+        result = []
+        for round_index in range(2):
+            spatial = self.spatial_masks[round_index] if self.diff else self.spatial_masks
+            temporal = self.temporal_masks[0] if self.diff else self.temporal_masks
+            topology = resolve_fixed_topology(replace(config,
+                spatial_masks=tuple(tuple(int(v) for v in row) for row in spatial.tolist()),
+                temporal_masks=tuple(tuple(int(v) for v in row) for row in temporal.tolist())))
+            if round_index == 0:
+                topology["temporal_edges"] = []
+            result.append(topology)
+        return result

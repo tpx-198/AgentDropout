@@ -29,12 +29,32 @@ python train.py --steps 3 --batch-size 2 --deepseek
 ```text
 policy_loss = mean(-reward × sum(round_log_prob))
 regularization = nuclear_norm(spatial_logits) + nuclear_norm(temporal_logits)
-               + relu(frobenius_norm(spatial_mask - spatial_logits) - delta)
-               + relu(frobenius_norm(temporal_mask - temporal_logits) - delta)
+               + relu(frobenius_norm(initial_spatial_mask - spatial_logits) - delta)
+               + relu(frobenius_norm(initial_temporal_mask - temporal_logits) - delta)
 loss = policy_loss + regularization
 ```
 
-奖励与批量基线共用原项目数值判分规则（包括原提取器局限）。没有新增 Token 惩罚、熵奖励、奖励基线或剪枝。
+奖励与批量基线共用原项目数值判分规则（包括原提取器局限）。没有新增 Token 惩罚、熵奖励或奖励基线。
+
+## 每轮独立拓扑（diff=True）
+
+```bash
+python train.py --diff --steps 6 --prune-every 2 --prune-until 4 --output-dir results/topology/round-demo
+python evaluate.py --checkpoint results/topology/round-demo/checkpoint.pt --limit 10
+python prune.py --checkpoint results/topology/round-demo/checkpoint.pt --limit 10
+```
+
+默认仍是共享参数（diff=False）；`--diff` 开启原项目的每轮独立分支。当前仍为 A、B 两名智能体、两轮与 FinalRefer：空间 logit／mask 形状为 `(2, 2, 2)`，首维对应第 1、2 轮；时间 logit／mask 为 `(1, 2, 2)`，对应第 1 轮到第 2 轮的通信。第一轮没有时间边，各轮空间采样仍逐条拒绝环路，优化模式的时间边保留自连接和反向边。
+
+原 `diff=True` 正则项对空间矩阵、时间矩阵分别计算各轮核范数均值及 Frobenius 范数均值，然后对每种 Frobenius 均值施加一次 `relu(mean - delta)`；不是对所有轮次求和，也不是先逐轮 relu 再求均值。按原 `update_masks_diff` 每张矩阵独立排序剪枝，不把所有轮次混在一起排序。训练记录包含每张矩阵的候选数、剪除数和轮次；时间矩阵标为接收轮次（这里为第 2 轮）。
+
+恢复时自动继承检查点的 diff 模式，不必再次写 `--diff`；显式 `--diff`／`--no-diff` 必须与检查点一致，拒绝在续训中切换。共享参数旧检查点继续支持评测；缺少 diff 字段按共享模式解释，形状不符会拒绝。源码变化仍遵守下文的严格续训来源校验。
+
+学习后评测自动识别模式。`sampled`（默认）逐轮使用各自参数采样；`--learned-mode original-fixed` 使用各轮 mask 并保留原固定时间边过滤。两种模式都记录逐轮连接、消息可见性和调用。`original-fixed` 的 `effective_topology` 在 diff=True 时是两轮列表，在共享模式下仍为原单个拓扑对象。
+
+迁移修正：核对原训练脚本时发现，原 Frobenius 目标始终是配置中的初始 mask，AD-L 之前在剪枝后误用了当前 mask。本次对两种模式都修正为初始配置，记录 `regularization_reference=initial_config_masks`；剪枝仅改变执行候选，不改变正则目标。这是原规则对齐，不是新增训练算法。历史实验未改写，不能把修正前后的训练轨迹当作同一实验续接。
+
+本步骤未迁移节点选择权重或节点跳过；每题仍为 5 次调用。原节点剪枝依赖独立的 `spatial_logits_1`／`temporal_logits_1`，不能将边训练参数直接冒充节点选择参数。
 
 ## 检查点续训
 
@@ -52,6 +72,34 @@ python train.py --resume results/topology/gsm8k-demo/checkpoint.pt --steps 5 --o
 
 旧 schema v1 合成题检查点缺少训练数据位置，不用于此入口的续训或学习后测试。
 
+## 训练中的周期边剪枝
+
+```bash
+python train.py --steps 6 --prune-every 2 --prune-until 4 --output-dir results/topology/cycle-demo
+```
+
+这会在第 2、4 个成功更新步之后剪枝，第 3、5、6 步继续在缩减后的候选图上训练。默认 `--prune-rate 0.25`；`--prune-every 0`（默认）关闭周期剪枝，原有不剪枝训练保持原行为。`--prune-until` 是允许剪枝的最后一个绝对步数（含），省略表示不设截止。`--steps` 仍是总训练步数，不作为剪枝截止条件。
+
+原 GSM8K 主循环在前 4 个更新步中每 2 步调用一次 update_masks。本入口复用相同的剪枝函数和“先更新、后剪枝”顺序，并将频率、比例和截止步显式参数化；这不是对原脚本硬编码的完整训练阶段、停训／推理切换的一比一移植。
+
+每次剪枝仅修改 mask，不重置 Adam，不抽取随机数。下一步按当前 mask 采样，正则目标仍使用初始配置。被禁用的 logit 仍可能受正则或 Adam 动量更新，但 mask 不会自动重新启用。`--prune-rate 0` 按原规则仍至少尝试剪一条；要完全关闭应使用 `--prune-every 0`。
+
+续训时只需要恢复训练检查点并增加目标步数：
+
+```bash
+python train.py --resume results/topology/cycle-demo/checkpoint.pt --steps 8
+```
+
+计划在训练开始时确定，续训从检查点继承；不能通过续训参数静默修改频率、比例或截止步。已有检查点仍遵循源码指纹与上下文校验，不绕过版本一致性检查。若希望比较不同剪枝计划，应从相同种子分别开始新实验。
+
+检查点新增 `pruning_state`，同时保存计划和全部已完成事件。事件步号为全局训练步号；恢复会核对数量、顺序和截止范围，避免在剪枝边界重复或遗漏。更新后参数、mask、Adam、RNG、cursor 和剪枝进度在同一个原子检查点中提交。失败批次不更新、不推进数据、不剪枝；保存前中断时从最近成功步重新执行整步。
+
+`history.jsonl` 每步新增 `pruning_event`（无剪枝时为 null），包含 mask、实际剪除数量及固定推理连接的前后变化。`summary.json` 记录累计／本次剪枝事件数和剩余候选数。终端也显示每次候选数变化。实际通信与 Token 是否减少仍需评测；两节点样例可能一次剪空空间边，时间边固定过滤还可能使某些连接开始生效。
+
+集成训练产生的检查点可继续训练并由现有 evaluate.py 加载。独立 prune.py 产生的 `evaluation_only` 产物仍只供评测，不能当作周期训练的续训入口。默认均为本地模拟，添加 `--deepseek` 才允许真实调用；剪枝本身不增加调用次数，上例 6 步、每步 2 题最多 60 次。可加 `--plan` 先查看全局剪枝步号和调用规模。
+
+已验证剪枝边界恢复、剪枝前失败及保存中断后重试，与连续训练的参数、Adam、RNG、数据位置和剪枝事件完全一致；这些完全一致的断言仅针对固定模拟响应。
+
 ## 学习后拓扑评测
 
 ```bash
@@ -64,13 +112,13 @@ python evaluate.py --checkpoint results/topology/gsm8k-demo/checkpoint.pt --base
 两种推理规则分别标记，不能混为同一种原算法结果：
 
 - `--learned-mode sampled`（默认）：冻结 logits，沿用原优化分支的边采样规则；使用检查点的拓扑温度，不反向传播、不更新参数。逐题保存采样边和概率。这是学习概率的冻结采样评测。
-- `--learned-mode original-fixed`：读取检查点 mask，按原非优化分支的空间／时间建边规则执行。这个分支忽略 logits；当前尚未剪枝，mask 未变时可能与固定基线完全相同。不会为了显示学习效果而自动加入阈值剪枝。
+- `--learned-mode original-fixed`：读取检查点 mask，按原非优化分支的空间／时间建边规则执行。这个分支忽略 logits；未剪枝、mask 未变时可能与固定基线完全相同。不会自动加入阈值剪枝。
 
 真实评测各组使用相同模型配置；检查点训练时的配置单独记录，可识别用模拟策略或不同模型训练后再测试的情况，不能将其误报为同模型真实训练的收益。
 
 ## 参数、采样与执行边界
 
-当前仍为两个节点、两轮、`diff=False`：空间和时间各有一个 2×2 可训练 logit 矩阵，两轮共享参数，mask 为固定缓冲区。概率为 `sigmoid(logit / temperature)`，初始 logit 为 `log(p/(1-p))`。
+当前仍为两个节点、两轮。默认 `diff=False` 时空间和时间各有一个 2×2 可训练 logit 矩阵，两轮共享参数；`--diff` 按上述方式逐轮独立。mask 为可由剪枝更新的缓冲区。概率为 `sigmoid(logit / temperature)`，初始 logit 为 `log(p/(1-p))`。
 
 候选按 A→A、A→B、B→A、B→B 顺序处理。空间边拒绝自连接与环路，mask=0 或成环的候选不抽随机数、不计 log_prob；第一轮无时间边，优化分支第二轮允许时间自连接和反向连接。接受／拒绝的候选分别累计 log(p)／log(1-p)，以 logsigmoid 稳定计算并保留梯度。
 
@@ -82,4 +130,4 @@ PyTorch 持有 `SampledRound.log_prob`，只把普通连接数据传入 LangGrap
 
 真实 Token 以提供方返回为准；缺失时总量为 null，已知小计单独保存。模型调用次数为尝试次数，自动重试为零。训练和评测的完整消息、失败类型等记录均不含密钥、请求头或异常原文。
 
-测试覆盖采样与原实现的边／log_prob／梯度对照、正则项对照、多步恢复一致性、失败不提交、训练／测试隔离、冻结评测不改变参数，以及原有单智能体、固定图和批量评测回归。当前独立边剪枝和配对评测已接入，见 [边剪枝说明](edge-pruning.md)；周期性训练剪枝、节点剪枝与 diff=True 仍待迁移，不用模拟结果证明训练效果。
+测试覆盖两种参数模式与原实现的边／log_prob／梯度对照、正则项对照、逐轮剪枝、多步恢复一致性、失败不提交、训练／测试隔离、冻结评测不改变参数，以及原有单智能体、固定图和批量评测回归。独立边剪枝、配对评测与周期训练边剪枝均已接入，见 [边剪枝说明](edge-pruning.md)；节点剪枝仍待迁移，不用模拟结果证明训练效果。
