@@ -1,4 +1,4 @@
-"""两个数学智能体、两轮固定通信图、FinalRefer，支持注入模型适配器。"""
+"""两轮数学协作图与 FinalRefer，支持注入模型适配器。"""
 
 import json
 from dataclasses import asdict, dataclass
@@ -13,7 +13,7 @@ from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
 from ad_l.models import ModelAdapter, ModelSettings, create_model_adapter
-from ad_l.prompts import build_final_refer_messages, build_math_agent_messages
+from ad_l.prompts import build_final_refer_messages, build_math_agent_messages, load_fixed_graph_prompts
 from ad_l.communication import execution_topology
 
 AGENTS = {"A": "Math Solver", "B": "Mathematical Analyst"}
@@ -25,19 +25,34 @@ class OfflineFixedGraphConfig:
     temporal_masks: tuple
     responses: tuple
     final_response: str
+    agents: tuple = tuple(AGENTS.items())
+
+    @property
+    def node_ids(self):
+        return tuple(node for node, _ in self.agents)
+
+    def model_calls(self, skip_nodes=(None, None)):
+        return 2 * len(self.agents) + 1 - sum(node is not None for node in skip_nodes)
 
     def __post_init__(self):
+        ids = self.node_ids
+        roles = load_fixed_graph_prompts()["roles"]
+        if (len(ids) < 2 or any(not isinstance(node, str) or not node.isidentifier() or node == "final" for node in ids)
+                or len(set(ids)) != len(ids) or ids != tuple(sorted(ids))
+                or any(role not in roles for _, role in self.agents)):
+            raise ValueError("需要至少两个角色受支持、ID 唯一且按字典序排列的智能体")
+        size = len(ids)
         for name in ("spatial_masks", "temporal_masks"):
             matrix = getattr(self, name)
-            if (not isinstance(matrix, (list, tuple)) or len(matrix) != 2
-                    or any(not isinstance(row, (list, tuple)) or len(row) != 2 for row in matrix)
+            if (not isinstance(matrix, (list, tuple)) or len(matrix) != size
+                    or any(not isinstance(row, (list, tuple)) or len(row) != size for row in matrix)
                     or any(type(v) is not int or v not in (0, 1) for row in matrix for v in row)):
-                raise ValueError(f"{name} 必须是 2×2 的 0/1 矩阵（行=来源，列=接收者）")
+                raise ValueError(f"{name} 必须是 {size}×{size} 的 0/1 矩阵（行=来源，列=接收者）")
             object.__setattr__(self, name, tuple(tuple(row) for row in matrix))
-        if (not isinstance(self.responses, (list, tuple)) or len(self.responses) != 2
+        if (not isinstance(self.responses, (list, tuple)) or len(self.responses) != size
                 or any(not isinstance(row, (list, tuple)) or len(row) != 2 for row in self.responses)
                 or any(not isinstance(v, str) or not v.strip() for row in self.responses for v in row)):
-            raise ValueError("A 和 B 必须各提供两条非空模拟回答")
+            raise ValueError("每个智能体必须各提供两条非空模拟回答")
         object.__setattr__(self, "responses", tuple(tuple(row) for row in self.responses))
         if not isinstance(self.final_response, str) or not self.final_response.strip():
             raise ValueError("final_response 必须为非空字符串")
@@ -46,25 +61,34 @@ class OfflineFixedGraphConfig:
     def from_dict(cls, data: dict):
         if not isinstance(data, dict):
             raise ValueError("固定图配置必须为 JSON 对象")
-        allowed = {"backend", "rounds", "spatial_masks", "temporal_masks", "responses", "final_response"}
+        allowed = {"backend", "rounds", "spatial_masks", "temporal_masks", "responses", "final_response", "agents"}
         if set(data) - allowed:
             raise ValueError(f"不支持的配置字段：{sorted(set(data) - allowed)}")
         if data.get("backend") != "mock" or type(data.get("rounds")) is not int or data["rounds"] != 2:
             raise ValueError("当前固定图仅支持 backend=mock、rounds=2")
         try:
-            if set(data["responses"]) != set(AGENTS):
-                raise ValueError("responses 只允许 A、B 两个智能体")
+            agents = data.get("agents", AGENTS)
+            if not isinstance(agents, dict) or any(not isinstance(node, str) or not isinstance(role, str)
+                                                   for node, role in agents.items()):
+                raise ValueError("agents 必须为节点 ID 到角色的映射")
+            if not isinstance(data["responses"], dict) or data["responses"].keys() != agents.keys():
+                raise ValueError("responses 必须与 agents 的节点 ID 一致")
+            ordered_agents = tuple(sorted(agents.items()))
             return cls(data["spatial_masks"], data["temporal_masks"],
-                       tuple(data["responses"][node_id] for node_id in AGENTS), data["final_response"])
+                       tuple(data["responses"][node_id] for node_id, _ in ordered_agents),
+                       data["final_response"], ordered_agents)
         except (KeyError, TypeError) as error:
             raise ValueError("固定图配置缺少字段或字段类型不正确") from error
 
     def to_dict(self):
-        return {"backend": "mock", "rounds": 2,
+        data = {"backend": "mock", "rounds": 2,
                 "spatial_masks": [list(row) for row in self.spatial_masks],
                 "temporal_masks": [list(row) for row in self.temporal_masks],
-                "responses": {node_id: list(self.responses[i]) for i, node_id in enumerate(AGENTS)},
+                "responses": {node_id: list(self.responses[i]) for i, node_id in enumerate(self.node_ids)},
                 "final_response": self.final_response}
+        if self.agents != tuple(AGENTS.items()):
+            data["agents"] = dict(self.agents)
+        return data
 
 
 def load_fixed_graph_config(path: Path) -> OfflineFixedGraphConfig:
@@ -73,7 +97,7 @@ def load_fixed_graph_config(path: Path) -> OfflineFixedGraphConfig:
 
 def resolve_fixed_topology(config: OfflineFixedGraphConfig) -> dict:
     """复现原固定图的行优先建边和空间环路检查，含时间边的原有过滤行为。"""
-    ids = list(AGENTS)
+    ids = config.node_ids
     spatial = []
 
     def reaches(start, target):
@@ -118,6 +142,7 @@ class FixedGraphState(FixedGraphInput, total=False):
     previous_outputs: dict
     round_outputs: list[dict]
     trace: list[dict]
+    skipped_nodes: list[dict]
     answer: str
     usage: dict | None
     model_calls: int
@@ -134,12 +159,17 @@ def build_fixed_graph(
     *,
     allow_real_api: bool = False,
     round_topologies: list[dict] | None = None,
+    skip_nodes: tuple[str | None, str | None] = (None, None),
 ):
-    """adapters 的键为 A、B、final；省略时按原预设响应离线运行。"""
+    """adapters 覆盖配置中的每个节点及 final。"""
+    agents = dict(config.agents)
+    if (not isinstance(skip_nodes, (tuple, list)) or len(skip_nodes) != 2
+            or any(node is not None and node not in config.node_ids for node in skip_nodes)):
+        raise ValueError("两轮各可指定一个要跳过的已配置智能体或 None")
     adapters = dict(adapters) if adapters is not None else None
     if adapters is not None:
-        if set(adapters) != {*AGENTS, "final"}:
-            raise ValueError("注入适配器必须同时提供 A、B、final")
+        if set(adapters) != {*agents, "final"}:
+            raise ValueError("注入适配器必须覆盖全部智能体及 final")
         for adapter in adapters.values():
             if not isinstance(adapter, ModelAdapter):
                 raise TypeError("必须注入 ModelAdapter 对象")
@@ -153,7 +183,7 @@ def build_fixed_graph(
     else:
         if len(round_topologies) != 2:
             raise ValueError("必须提供两轮普通连接数据")
-        topologies = [execution_topology(item["spatial_edges"], item["temporal_edges"])
+        topologies = [execution_topology(item["spatial_edges"], item["temporal_edges"], config.node_ids)
                       for item in round_topologies]
         if topologies[0]["temporal_edges"]:
             raise ValueError("第一轮不能有时间边")
@@ -163,30 +193,36 @@ def build_fixed_graph(
         if not isinstance(task, str) or not task.strip():
             raise ValueError("task 必须为非空字符串")
         return {"current_outputs": {}, "previous_outputs": {}, "round_outputs": [],
-                "trace": [], "answer": "", "usage": None, "model_calls": 0, "real_api_calls": 0,
+                "trace": [], "skipped_nodes": [], "answer": "", "usage": None, "model_calls": 0, "real_api_calls": 0,
                 "status": "running", "known_usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
                 "usage_complete": False, "setup_error": None}
 
     def visible(outputs, edges, target):
-        return {source: {"role": AGENTS[source], "output": outputs[source]}
-                for source in AGENTS if [source, target] in edges and source in outputs}
+        return {source: {"role": agents[source], "output": outputs[source]}
+                for source in agents if [source, target] in edges and source in outputs}
 
     def make_call_node(round_index, node_id):
         final = node_id == "final"
+
+        if node_id == skip_nodes[round_index]:
+            def skip(state):
+                return {"current_outputs": {**state["current_outputs"], node_id: "None."},
+                        "skipped_nodes": [*state["skipped_nodes"], {"round": round_index + 1, "node_id": node_id}]}
+            return skip
 
         def prepare(state):
             topology = topologies[round_index]
             if final:
                 spatial = {source: {"role": role, "output": state["previous_outputs"][source]}
-                           for source, role in AGENTS.items()}
+                           for source, role in agents.items()}
                 temporal = {}
                 messages = build_final_refer_messages(state["task"], spatial)
                 text = config.final_response
             else:
                 spatial = visible(state["current_outputs"], topology["spatial_edges"], node_id)
                 temporal = visible(state["previous_outputs"], topology["temporal_edges"], node_id)
-                messages = build_math_agent_messages(state["task"], AGENTS[node_id], spatial, temporal)
-                text = config.responses[list(AGENTS).index(node_id)][round_index]
+                messages = build_math_agent_messages(state["task"], agents[node_id], spatial, temporal)
+                text = config.responses[config.node_ids.index(node_id)][round_index]
             # 每次调用单独创建模拟客户端，避免共享响应游标导致任务间或并发运行串线。
             adapter = adapters[node_id] if adapters is not None else create_model_adapter(mock_response=text)
             return messages, spatial, temporal, adapter
@@ -196,7 +232,7 @@ def build_fixed_graph(
             if error is None and (not isinstance(response, AIMessage) or not isinstance(response.content, str)):
                 error = TypeError("固定图仅支持 AIMessage 文本回答")
             entry = {"stage": "final" if final else "agent", "round": round_index + 1,
-                     "node_id": node_id, "role": "FinalRefer" if final else AGENTS[node_id],
+                     "node_id": node_id, "role": "FinalRefer" if final else agents[node_id],
                      "spatial_info": spatial, "temporal_info": temporal,
                      "messages": [{"role": m.type, "content": m.content} for m in messages],
                      "output": response.content if error is None else None, "usage": usage,

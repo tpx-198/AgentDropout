@@ -17,8 +17,9 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from ad_l.datasets import load_gsm8k, sample_gsm8k
 from ad_l.evaluation import SCORER
-from ad_l.fixed_graph import load_fixed_graph_config
+from ad_l.fixed_graph import OfflineFixedGraphConfig, load_fixed_graph_config
 from ad_l.models import ModelSettings, create_model_adapter
+from ad_l.node_pruning import load_node_pruning
 from ad_l.training import load_training_checkpoint, train_multistep, pruning_schedule, pruning_due
 
 
@@ -36,22 +37,25 @@ def main():
     parser.add_argument("--prune-rate", type=float, help="每次剪枝比例，默认 0.25")
     parser.add_argument("--prune-until", type=int, help="允许剪枝的最后一个绝对训练步（含）")
     parser.add_argument("--resume", type=Path)
+    parser.add_argument("--node-pruning", type=Path, help="从 nodes.py 的 pruning.json 开始边训练，自动开启 --diff")
     parser.add_argument("--diff", action=argparse.BooleanOptionalAction, default=None,
                         help="每轮独立拓扑参数；默认共享，续训自动继承")
-    parser.add_argument("--deepseek", action="store_true", help="允许真实训练，每步最多 batch-size × 5 次调用")
+    parser.add_argument("--deepseek", action="store_true", help="允许真实训练，可用 --plan 查看调用上限")
     parser.add_argument("--plan", action="store_true")
     parser.add_argument("--model")
     parser.add_argument("--model-temperature", type=float)
     parser.add_argument("--max-tokens", type=int)
     parser.add_argument("--timeout", type=float)
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data/gsm8k")
-    parser.add_argument("--config", type=Path, default=ROOT / "configs/fixed_graph_offline.json")
+    parser.add_argument("--config", type=Path)
     parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args()
     try:
         checkpoint = load_training_checkpoint(args.resume) if args.resume else None
         old = checkpoint["context"] if checkpoint else {}
-        diff = old.get("diff", False) if args.diff is None else args.diff
+        if checkpoint and args.node_pruning:
+            raise ValueError("续训从检查点继承节点剪枝计划")
+        diff = old.get("diff", bool(args.node_pruning)) if args.diff is None else args.diff
         if checkpoint and diff != old.get("diff", False):
             raise ValueError("续训不能切换 diff 参数模式")
         defaults = {"seed": 0, "lr": 0.1, "batch_size": 2, "initial_probability": 0.5,
@@ -73,7 +77,13 @@ def main():
         pool, dataset = load_gsm8k(args.data_dir / "train.jsonl", "train", verify_official=True)
         if hp["limit"] is not None:
             pool = sample_gsm8k(pool, hp["limit"], hp["seed"])
-        config = load_fixed_graph_config(args.config)
+        if checkpoint and args.config is None:
+            config = OfflineFixedGraphConfig.from_dict(old["config"])
+        else:
+            config = load_fixed_graph_config(args.config or ROOT / "configs/fixed_graph_offline.json")
+        node_pruning = load_node_pruning(args.node_pruning, config) if args.node_pruning else old.get("node_pruning")
+        if node_pruning is not None and not diff:
+            raise ValueError("节点剪枝只支持逐轮独立边拓扑")
         start = checkpoint["step"] if checkpoint else 0
         steps = args.steps if args.steps is not None else (start + 1 if checkpoint else 3)
         if steps <= start:
@@ -85,11 +95,13 @@ def main():
             raise ValueError("独立剪枝检查点仅供评测；周期训练应从训练检查点续训")
     except (OSError, ValueError, KeyError) as error:
         parser.error(str(error))
-    calls = (steps - start) * hp["batch_size"] * 5
+    skip_nodes = node_pruning["skip_plan"] if node_pruning is not None else (None, None)
+    calls = (steps - start) * hp["batch_size"] * config.model_calls(skip_nodes)
     if args.plan:
         print(json.dumps({"split": "train", "pool_size": len(pool), "step_start": start,
                           "target_steps": steps, "batch_size": hp["batch_size"],
                           "diff": diff,
+                          "node_pruning": node_pruning,
                           "pruning_schedule": schedule,
                           "pruning_steps_this_run": [step for step in range(start + 1, steps + 1) if pruning_due(step, schedule)],
                           "planned_model_calls": calls, "planned_real_api_calls": calls if args.deepseek else 0}, indent=2))
@@ -120,6 +132,8 @@ def main():
                "scorer": SCORER, "diff": diff, "python": platform.python_version(),
                "versions": {name: metadata.version(name) for name in ("torch", "langgraph", "langchain-core", "langchain-deepseek")},
                "code_sha256": {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest() for path in sources}}
+    if node_pruning is not None:
+        context["node_pruning"] = node_pruning
     output = args.output_dir or ROOT / "results/topology" / uuid4().hex
     try:
         report = train_multistep(pool, config, settings, context, output, steps, checkpoint=checkpoint,

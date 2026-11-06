@@ -18,9 +18,10 @@ class SampledRound:
     temporal_edges: tuple
     log_prob: torch.Tensor
     decisions: tuple
+    node_ids: tuple = ("A", "B")
 
     def for_execution(self):
-        return execution_topology(self.spatial_edges, self.temporal_edges)
+        return execution_topology(self.spatial_edges, self.temporal_edges, self.node_ids)
 
     def for_report(self):
         return {"round": self.round_index + 1, **self.for_execution(),
@@ -28,19 +29,24 @@ class SampledRound:
 
 
 class TopologyPolicy(nn.Module):
-    """两节点；diff=True 时两轮空间参数、一组跨轮时间参数各自独立。"""
+    """diff=True 时两轮空间参数、一组跨轮时间参数各自独立。"""
 
-    def __init__(self, spatial_masks, temporal_masks, initial_probability=0.5, *, diff=False):
+    def __init__(self, spatial_masks, temporal_masks, initial_probability=0.5, *, diff=False, node_ids=("A", "B")):
         super().__init__()
         if type(diff) is not bool:
             raise ValueError("diff 必须是布尔值")
         self.diff = diff
+        self.node_ids = tuple(node_ids)
+        size = len(self.node_ids)
+        if size < 2 or len(set(self.node_ids)) != size:
+            raise ValueError("拓扑需要至少两个不同的节点")
+        matrix_shape = (size, size)
         if not math.isfinite(initial_probability) or not 0 < initial_probability < 1:
             raise ValueError("initial_probability 必须严格位于 0 和 1 之间")
         for name, masks in [("spatial_masks", spatial_masks), ("temporal_masks", temporal_masks)]:
             tensor = torch.as_tensor(masks, dtype=torch.float32)
-            shape = ((2 if name == "spatial_masks" else 1), 2, 2) if diff else (2, 2)
-            if diff and tensor.shape == (2, 2):
+            shape = ((2 if name == "spatial_masks" else 1), *matrix_shape) if diff else matrix_shape
+            if diff and tensor.shape == matrix_shape:
                 tensor = tensor.expand(shape)
             if tensor.shape != shape or not torch.all((tensor == 0) | (tensor == 1)):
                 raise ValueError(f"{name} 必须是形状 {shape} 的 0/1 矩阵")
@@ -58,7 +64,7 @@ class TopologyPolicy(nn.Module):
             raise ValueError("temperature 必须是有限正数")
         if not all(torch.isfinite(parameter).all() for parameter in self.parameters()):
             raise ValueError("拓扑参数必须有限")
-        nodes = ("A", "B")
+        nodes = self.node_ids
         result = []
         for round_index in range(rounds):
             spatial, temporal, decisions = [], [], []
@@ -99,7 +105,7 @@ class TopologyPolicy(nn.Module):
                         decisions.append({"kind": kind, "source": source, "target": target,
                                           "selected": selected, "probability": probability.detach().item()})
             result.append(SampledRound(round_index, tuple(spatial), tuple(temporal),
-                                       torch.stack(terms).sum(), tuple(decisions)))
+                                       torch.stack(terms).sum(), tuple(decisions), nodes))
         return result
 
     def regularization_loss(self, delta=0.1, *, reference_masks=None):
@@ -120,6 +126,8 @@ class TopologyPolicy(nn.Module):
         """逐轮复现原非优化建边规则；第一轮没有跨轮输入。"""
         from dataclasses import replace
         from ad_l.fixed_graph import resolve_fixed_topology
+        if self.node_ids != config.node_ids:
+            raise ValueError("策略与配置的节点顺序不一致")
         result = []
         for round_index in range(2):
             spatial = self.spatial_masks[round_index] if self.diff else self.spatial_masks

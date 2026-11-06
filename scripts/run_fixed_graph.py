@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from langsmith import tracing_context
 
-from ad_l.fixed_graph import AGENTS, build_fixed_graph, load_fixed_graph_config, resolve_fixed_topology
+from ad_l.fixed_graph import build_fixed_graph, load_fixed_graph_config, resolve_fixed_topology
 from ad_l.models import ModelSettings, create_model_adapter
 from ad_l.prompts import load_fixed_graph_prompts
 
@@ -56,7 +56,7 @@ def main():
         parser.error("模型生成参数仅用于真实后端；模拟回答请修改 --config")
     if args.backend == "deepseek":
         if not args.allow_real_api:
-            parser.error("真实模型请求需要 --allow-real-api；完整运行将尝试 5 次模型调用")
+            parser.error(f"真实模型请求需要 --allow-real-api；完整运行将尝试 {config.model_calls()} 次模型调用")
         from dotenv import load_dotenv
 
         load_dotenv(ROOT / ".env", override=False)
@@ -69,7 +69,7 @@ def main():
             parser.error(str(error))
         except Exception as error:
             parser.error(f"模型客户端初始化失败：{type(error).__name__}")
-        adapters = {node_id: adapter for node_id in [*AGENTS, "final"]}
+        adapters = {node_id: adapter for node_id in (*config.node_ids, "final")}
     random.seed(args.seed)
     graph = build_fixed_graph(config, adapters, allow_real_api=args.allow_real_api)
     started = perf_counter()
@@ -82,7 +82,7 @@ def main():
         "schema_version": 2, "run_id": uuid4().hex,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "domain": "gsm8k", "task": args.task, "rounds": 2,
-        "agents": AGENTS, "decision_method": "FinalRefer",
+        "agents": dict(config.agents), "decision_method": "FinalRefer",
         "data_split": "manual", "sample_id": None,
         "local_seed": args.seed, "provider_seed": None,
         "settings": asdict(settings), "config": config.to_dict() if args.backend == "mock" else {

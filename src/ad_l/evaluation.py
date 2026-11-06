@@ -96,8 +96,11 @@ def write_json(path, value):
 def run_baselines(samples, config, settings, output_dir: Path, manifest: dict, *,
                   baselines=("single", "fixed"), allow_real_api=False, adapter_factory=None,
                   learned_policy=None, learned_generator=None, learned_mode="sampled", learned_temperature=1.0,
-                  policy_variants=None):
+                  policy_variants=None, skip_variants=None):
     policy_variants = policy_variants or {}
+    skip_variants = skip_variants or {}
+    if set(skip_variants) - ({*policy_variants, "learned"} & set(baselines)):
+        raise ValueError("跳过计划必须对应一个已启用的拓扑变体")
     if set(policy_variants) & {"single", "fixed", "learned"}:
         raise ValueError("配对变体名称不能覆盖原有基线")
     if policy_variants and (learned_mode != "original-fixed" or any(sample.split != "test" for sample in samples)):
@@ -138,13 +141,15 @@ def run_baselines(samples, config, settings, output_dir: Path, manifest: dict, *
                             adapter = make_adapter()
                         else:
                             adapters = None if settings.backend == "mock" and adapter_factory is None else {
-                                node: make_adapter() for node in ("A", "B", "final")}
+                                node: make_adapter() for node in (*config.node_ids, "final")}
                             active_config = config
                             round_topologies = None
                             if baseline == "learned" or baseline in policy_variants:
                                 import torch
                                 from dataclasses import replace
                                 policy = policy_variants[baseline] if baseline in policy_variants else learned_policy
+                                if policy.node_ids != config.node_ids:
+                                    raise ValueError("策略与评测配置的节点顺序不一致")
                                 policy.eval()
                                 with torch.no_grad():
                                     if learned_mode == "sampled":
@@ -162,7 +167,8 @@ def run_baselines(samples, config, settings, output_dir: Path, manifest: dict, *
                             if round_topologies is None:
                                 effective_topology = resolve_fixed_topology(active_config)
                             graph = build_fixed_graph(active_config, adapters, allow_real_api=allow_real_api,
-                                                      round_topologies=round_topologies)
+                                                      round_topologies=round_topologies,
+                                                      skip_nodes=skip_variants.get(baseline, (None, None)))
                     except Exception as error:
                         state = {"status": "failed", "answer": "", "trace": [], "round_outputs": [],
                                  "model_calls": 0, "real_api_calls": 0,
@@ -174,6 +180,7 @@ def run_baselines(samples, config, settings, output_dir: Path, manifest: dict, *
                            "question": sample.question, "target": sample.target, "baseline": baseline,
                            "scorer": SCORER, "answer": state["answer"], "status": state["status"],
                            "trace": state["trace"], "round_outputs": state["round_outputs"],
+                           "skipped_nodes": state.get("skipped_nodes", []),
                            "model_calls": state["model_calls"], "real_api_calls": state["real_api_calls"],
                            "setup_error": state.get("setup_error"),
                            "learned_mode": learned_mode if baseline == "learned" or baseline in policy_variants else None,

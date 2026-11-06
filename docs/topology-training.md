@@ -54,7 +54,7 @@ python prune.py --checkpoint results/topology/round-demo/checkpoint.pt --limit 1
 
 迁移修正：核对原训练脚本时发现，原 Frobenius 目标始终是配置中的初始 mask，AD-L 之前在剪枝后误用了当前 mask。本次对两种模式都修正为初始配置，记录 `regularization_reference=initial_config_masks`；剪枝仅改变执行候选，不改变正则目标。这是原规则对齐，不是新增训练算法。历史实验未改写，不能把修正前后的训练轨迹当作同一实验续接。
 
-本步骤未迁移节点选择权重或节点跳过；每题仍为 5 次调用。原节点剪枝依赖独立的 `spatial_logits_1`／`temporal_logits_1`，不能将边训练参数直接冒充节点选择参数。
+边拓扑训练每题仍为 5 次调用。节点剪枝使用单独训练的 `spatial_logits_1`／`temporal_logits_1` 对应参数，见 [节点剪枝说明](node-pruning.md)。
 
 ## 检查点续训
 
@@ -118,7 +118,7 @@ python evaluate.py --checkpoint results/topology/gsm8k-demo/checkpoint.pt --base
 
 ## 参数、采样与执行边界
 
-当前仍为两个节点、两轮。默认 `diff=False` 时空间和时间各有一个 2×2 可训练 logit 矩阵，两轮共享参数；`--diff` 按上述方式逐轮独立。mask 为可由剪枝更新的缓冲区。概率为 `sigmoid(logit / temperature)`，初始 logit 为 `log(p/(1-p))`。
+当前支持两轮，节点数 N 由配置决定，默认是两个节点。默认 `diff=False` 时空间和时间各有一个 N×N 可训练 logit 矩阵，两轮共享参数；`--diff` 为两轮各建一张空间矩阵，并为第 1 轮到第 2 轮建立一张时间矩阵。mask 为可由剪枝更新的缓冲区。概率为 `sigmoid(logit / temperature)`，初始 logit 为 `log(p/(1-p))`。
 
 候选按 A→A、A→B、B→A、B→B 顺序处理。空间边拒绝自连接与环路，mask=0 或成环的候选不抽随机数、不计 log_prob；第一轮无时间边，优化分支第二轮允许时间自连接和反向连接。接受／拒绝的候选分别累计 log(p)／log(1-p)，以 logsigmoid 稳定计算并保留梯度。
 
@@ -130,4 +130,4 @@ PyTorch 持有 `SampledRound.log_prob`，只把普通连接数据传入 LangGrap
 
 真实 Token 以提供方返回为准；缺失时总量为 null，已知小计单独保存。模型调用次数为尝试次数，自动重试为零。训练和评测的完整消息、失败类型等记录均不含密钥、请求头或异常原文。
 
-测试覆盖两种参数模式与原实现的边／log_prob／梯度对照、正则项对照、逐轮剪枝、多步恢复一致性、失败不提交、训练／测试隔离、冻结评测不改变参数，以及原有单智能体、固定图和批量评测回归。独立边剪枝、配对评测与周期训练边剪枝均已接入，见 [边剪枝说明](edge-pruning.md)；节点剪枝仍待迁移，不用模拟结果证明训练效果。
+测试覆盖两种参数模式与原实现的边／log_prob／梯度对照、正则项对照、逐轮剪枝、多步恢复一致性、失败不提交、训练／测试隔离、冻结评测不改变参数，以及原有单智能体、固定图和批量评测回归。剪枝入口见 [边剪枝说明](edge-pruning.md) 和 [节点剪枝说明](node-pruning.md)。

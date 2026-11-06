@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from ad_l.datasets import GSM8K_FILES, load_gsm8k, sample_gsm8k
 from ad_l.evaluation import SCORER, run_baselines
-from ad_l.fixed_graph import load_fixed_graph_config, resolve_fixed_topology
+from ad_l.fixed_graph import OfflineFixedGraphConfig, load_fixed_graph_config, resolve_fixed_topology
 from ad_l.models import ModelSettings, create_model_adapter
 from ad_l.prompts import load_fixed_graph_prompts, load_math_solver_prompt
 
@@ -33,7 +33,7 @@ def main():
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--learned-mode", choices=["sampled", "original-fixed"], default="sampled")
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data/gsm8k")
-    parser.add_argument("--config", type=Path, default=ROOT / "configs/fixed_graph_offline.json")
+    parser.add_argument("--config", type=Path)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--plan", action="store_true", help="只查看样本与调用规模，不读取密钥、不创建模型")
     parser.add_argument("--model")
@@ -44,12 +44,13 @@ def main():
     try:
         pool, dataset = load_gsm8k(args.data_dir / GSM8K_FILES[args.split][0], args.split, verify_official=True)
         samples = sample_gsm8k(pool, args.limit, args.seed)
-        config = load_fixed_graph_config(args.config)
+        config = load_fixed_graph_config(args.config or ROOT / "configs/fixed_graph_offline.json")
     except (OSError, ValueError) as error:
         parser.error(f"{error}；数据准备：python scripts/prepare_gsm8k.py")
     baselines = (("single", "fixed", "learned") if args.baseline == "all" or (args.baseline == "both" and args.checkpoint)
                  else ("single", "fixed") if args.baseline == "both" else (args.baseline,))
     learned_policy, learned_generator, checkpoint_info = None, None, None
+    skip_variants = {}
     learned_temperature = 1.0
     if "learned" in baselines:
         if args.checkpoint is None or args.split != "test":
@@ -67,11 +68,23 @@ def main():
                                "step": checkpoint["step"], "training_dataset": checkpoint["context"]["dataset"],
                                "training_settings": checkpoint["context"]["settings"], "mode": args.learned_mode,
                                "diff": learned_policy.diff}
+            node_pruning = checkpoint["context"].get("node_pruning")
+            trained_config = OfflineFixedGraphConfig.from_dict(checkpoint["context"]["config"])
+            if args.config is None:
+                config = trained_config
+            elif config.agents != trained_config.agents:
+                raise ValueError("评测的节点和角色必须与检查点一致")
+            if node_pruning is not None:
+                if config != trained_config:
+                    raise ValueError("节点剪枝检查点需要与训练相同的初始配置")
+                skip_variants["learned"] = tuple(node_pruning["skip_plan"])
+                checkpoint_info["node_pruning"] = node_pruning
         except (OSError, ValueError, KeyError) as error:
             parser.error(str(error))
     elif args.checkpoint is not None:
         parser.error("指定检查点时请选择 learned、all 或默认的 both")
-    calls = args.limit * sum(1 if baseline == "single" else 5 for baseline in baselines)
+    calls = args.limit * sum(1 if baseline == "single" else config.model_calls(skip_variants.get(baseline, (None, None)))
+                             for baseline in baselines)
     plan = {"dataset": dataset, "sample_ids": [sample.sample_id for sample in samples], "checkpoint": checkpoint_info,
             "seed": args.seed, "baselines": baselines, "planned_model_calls": calls,
             "planned_real_api_calls": calls if args.deepseek else 0}
@@ -104,7 +117,8 @@ def main():
     manifest = {"schema_version": 1, "run_id": run_id, "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                 **plan, "local_seed": args.seed, "provider_seed": None, "scorer": SCORER,
                 "metrics_kind": "mock_diagnostic" if not args.deepseek else "model_evaluation",
-                "settings": asdict(settings), "agents": {"single": "Math Solver", "fixed": ["Math Solver", "Mathematical Analyst", "FinalRefer"]},
+                "settings": asdict(settings), "agents": {"single": "Math Solver",
+                    "fixed": [*(role for _, role in config.agents), "FinalRefer"]},
                 "fixed_topology": resolve_fixed_topology(config),
                 "fixed_config": config.to_dict() if not args.deepseek else {
                     key: value for key, value in config.to_dict().items()
@@ -122,7 +136,8 @@ def main():
     report = run_baselines(samples, config, settings, output, manifest, baselines=baselines,
                            allow_real_api=args.deepseek, adapter_factory=factory,
                            learned_policy=learned_policy, learned_generator=learned_generator,
-                           learned_mode=args.learned_mode, learned_temperature=learned_temperature)
+                           learned_mode=args.learned_mode, learned_temperature=learned_temperature,
+                           skip_variants=skip_variants)
     print(json.dumps(report["summary"], ensure_ascii=False, indent=2))
     print(f"评测记录：{output.resolve()}")
     if report["status"] != "success":

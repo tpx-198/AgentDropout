@@ -168,6 +168,26 @@ class PruningTests(unittest.TestCase):
             self.assertIsNone(comparison["total_tokens_delta_after_minus_before"])
             self.assertNotIn("SECRET_KEY", (output / "predictions.jsonl").read_text())
 
+    def test_named_pairs_exclude_unrelated_failures_and_track_missing_groups(self):
+        def row(sample, baseline, status, correct=False, tokens=12):
+            return {"sample_id": sample, "baseline": baseline, "status": status,
+                    "correct": correct, "trace": [{"usage": {"total_tokens": tokens}}],
+                    "model_calls": 5, "elapsed_seconds": 1}
+
+        rows = [row("0", "before", "success", True, tokens=20),
+                row("0", "random", "success"),
+                row("0", "after", "failed"),
+                row("1", "before", "success", True)]
+        random_vs_full = compare_pairs(rows, 2, "deepseek", after="random")
+        self.assertEqual(random_vs_full["paired_successful"], 1)
+        self.assertEqual(random_vs_full["missing_pairs"], 1)
+        self.assertEqual(random_vs_full["accuracy_delta_after_minus_before"], -1)
+        self.assertEqual(random_vs_full["total_tokens_delta_after_minus_before"], -8)
+        learned_vs_random = compare_pairs(rows, 2, "deepseek", before="random")
+        self.assertEqual(learned_vs_random["paired_attempted"], 1)
+        self.assertEqual(learned_vs_random["efficiency_pairs"], 0)
+        self.assertIsNone(learned_vs_random["total_tokens_delta_after_minus_before"])
+
     @unittest.skipUnless((ROOT / "data/gsm8k/test.jsonl").exists(), "官方数据需先准备")
     def test_cli_plan_no_models_and_prune_only_preserves_source_file(self):
         import scripts.prune_topology as entry

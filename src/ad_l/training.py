@@ -11,6 +11,8 @@ from pathlib import Path
 import torch
 
 from ad_l.evaluation import write_json
+from ad_l.fixed_graph import OfflineFixedGraphConfig
+from ad_l.node_pruning import node_pruned_masks
 from ad_l.topology import TopologyPolicy
 from ad_l.topology_training import topology_training_step
 
@@ -61,17 +63,36 @@ def load_training_checkpoint(path):
     return checkpoint
 
 
+def node_pruning_masks(context, config):
+    pruning = context["node_pruning"]
+    if context.get("diff") is not True:
+        raise ValueError("节点剪枝只支持逐轮独立边拓扑")
+    spatial, temporal = node_pruned_masks(config, pruning["skip_plan"])
+    if pruning["spatial_masks"] != spatial or pruning["temporal_masks"] != temporal:
+        raise ValueError("初始剪枝掩码与节点跳过计划不一致")
+    return spatial, temporal
+
+
 def policy_from_checkpoint(checkpoint):
     state = checkpoint["model_state_dict"]
-    diff = checkpoint.get("context", {}).get("diff", False)
+    context = checkpoint.get("context", {})
+    diff = context.get("diff", False)
     if type(diff) is not bool:
         raise ValueError("检查点 diff 必须是布尔值")
-    shapes = {"spatial_masks": (2, 2, 2) if diff else (2, 2),
-              "temporal_masks": (1, 2, 2) if diff else (2, 2)}
+    config = OfflineFixedGraphConfig.from_dict(context["config"]) if "config" in context else None
+    node_ids = config.node_ids if config is not None else ("A", "B")
+    matrix = (len(node_ids), len(node_ids))
+    shapes = {"spatial_masks": (2, *matrix) if diff else matrix,
+              "temporal_masks": (1, *matrix) if diff else matrix}
     if any(state[name].shape != shape or state[name.replace("masks", "logits")].shape != shape
            for name, shape in shapes.items()):
         raise ValueError("检查点参数形状与 diff 模式不一致")
-    policy = TopologyPolicy(state["spatial_masks"], state["temporal_masks"], diff=diff)
+    policy = TopologyPolicy(state["spatial_masks"], state["temporal_masks"], diff=diff, node_ids=node_ids)
+    if "node_pruning" in context:
+        masks = node_pruning_masks(context, config)
+        for kind, initial in zip(("spatial", "temporal"), masks):
+            if (getattr(policy, kind + "_masks") > torch.tensor(initial)).any():
+                raise ValueError("检查点重新启用了已剪除的候选边")
     try:
         policy.load_state_dict(state)
     except RuntimeError as error:
@@ -107,8 +128,13 @@ def train_multistep(pool, config, settings, context, output_dir, total_steps, *,
         raise ValueError("上下文必须记录实际模型和通信配置")
     if context.get("pool_sample_ids") != [sample.sample_id for sample in pool]:
         raise ValueError("训练样本池与上下文不一致")
+    skip_nodes = (None, None)
+    masks = config.spatial_masks, config.temporal_masks
+    if "node_pruning" in context:
+        masks = node_pruning_masks(context, config)
+        skip_nodes = tuple(context["node_pruning"]["skip_plan"])
     policy = policy_from_checkpoint(checkpoint) if checkpoint else TopologyPolicy(
-        config.spatial_masks, config.temporal_masks, hp["initial_probability"], diff=context.get("diff", False))
+        *masks, hp["initial_probability"], diff=context.get("diff", False), node_ids=config.node_ids)
     optimizer = torch.optim.Adam(policy.parameters(), lr=hp["lr"])
     generator = torch.Generator().manual_seed(hp["seed"])
     pruning_state = {"schedule": schedule, "events": []}
@@ -142,7 +168,7 @@ def train_multistep(pool, config, settings, context, output_dir, total_steps, *,
             rng_before = generator.get_state()
             report = topology_training_step(policy, optimizer, config, examples, generator=generator,
                 temperature=hp["temperature"], delta=hp["delta"], settings=settings,
-                adapter_factory=adapter_factory, allow_real_api=allow_real_api)
+                adapter_factory=adapter_factory, allow_real_api=allow_real_api, skip_nodes=skip_nodes)
             report.update({"step": step, "data_split": "train", "backend": settings.backend,
                            "cursor_before": cursor, "sample_ids": [sample.sample_id for sample in batch]})
             report["pruning_event"] = None

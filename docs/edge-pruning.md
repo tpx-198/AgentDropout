@@ -39,7 +39,7 @@ python prune.py --checkpoint results/topology/gsm8k-demo/checkpoint.pt --limit 1
 
 原固定时间边受当前空间图的 check_cycle 影响。空间边删除后，原先被阻止的时间边可能开始生效。因此候选 mask 单调减少，但实际时间连接不保证单调减少。报告同时保存 `effective_before`、`effective_after`、`effective_removed` 和 `effective_added`；逐题记录保存实际连接及可见消息。这是原代码行为的迁移。
 
-两组正常情况下都执行两名智能体、两轮和最终汇总，每题均为 5 次模型调用。边剪枝是否减少输入 Token 必须实测；节点剪枝尚未实现。
+边剪枝的两组都执行两名智能体、两轮和最终汇总，每题均为 5 次模型调用。输入 Token 变化以实测为准。跳过智能体的流程见 [节点剪枝说明](node-pruning.md)。
 
 ## 产物与来源
 

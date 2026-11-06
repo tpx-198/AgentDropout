@@ -33,7 +33,7 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--prune-only", action="store_true")
     parser.add_argument("--plan", action="store_true")
-    parser.add_argument("--deepseek", action="store_true", help="允许真实配对评测，每题最多 10 次请求")
+    parser.add_argument("--deepseek", action="store_true", help="允许真实配对评测，可用 --plan 查看调用上限")
     parser.add_argument("--model")
     parser.add_argument("--temperature", type=float)
     parser.add_argument("--max-tokens", type=int)
@@ -54,7 +54,11 @@ def main():
             samples = sample_gsm8k(pool, args.limit, args.seed)
     except (OSError, ValueError, KeyError) as error:
         parser.error(str(error))
-    calls = len(samples) * 10
+    node_pruning = checkpoint["context"].get("node_pruning")
+    skip_variants = {}
+    if node_pruning is not None:
+        skip_variants = dict.fromkeys(("before", "after"), tuple(node_pruning["skip_plan"]))
+    calls = len(samples) * 2 * config.model_calls(skip_variants.get("before", (None, None)))
     if args.plan:
         print(json.dumps({"pruning": pruning, "sample_ids": [sample.sample_id for sample in samples],
                           "planned_model_calls": calls, "planned_real_api_calls": calls if args.deepseek else 0},
@@ -105,7 +109,8 @@ def main():
                         for path in sorted((ROOT / "src/ad_l").glob("*.py"))}}
     result = run_baselines(samples, config, settings, output / "evaluation", manifest,
         baselines=("before", "after"), allow_real_api=args.deepseek, adapter_factory=factory,
-        learned_mode="original-fixed", policy_variants={"before": before, "after": after})
+        learned_mode="original-fixed", policy_variants={"before": before, "after": after},
+        skip_variants=skip_variants)
     rows = [json.loads(line) for line in (output / "evaluation/predictions.jsonl").read_text().splitlines()]
     comparison = {"status": result["status"], "summary": result["summary"],
                   "comparison": compare_pairs(rows, len(samples), settings.backend),

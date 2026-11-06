@@ -1,0 +1,17 @@
+{
+  "backend": "mock",
+  "rounds": 2,
+  "agents": {
+    "A": "Math Solver",
+    "B": "Mathematical Analyst",
+    "C": "Inspector"
+  },
+  "spatial_masks": [[0, 1, 1], [0, 0, 0], [0, 0, 0]],
+  "temporal_masks": [[1, 1, 1], [1, 1, 1], [1, 1, 1]],
+  "responses": {
+    "A": ["[MOCK A round 1] Add 3 and 2.\nThe answer is 5", "[MOCK A round 2] Recheck the sum.\nThe answer is 5"],
+    "B": ["[MOCK B round 1] Let x = 3 + 2.\nThe answer is 5", "[MOCK B round 2] Verify x.\nThe answer is 5"],
+    "C": ["[MOCK C round 1] Check the calculation.\nThe answer is 5", "[MOCK C round 2] Confirm the calculation.\nThe answer is 5"]
+  },
+  "final_response": "[MOCK FinalRefer] The answer is 5"
+}

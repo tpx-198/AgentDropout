@@ -7,7 +7,7 @@
 - 项目目录：`/Users/tpx-198/code/AD-L`。
 - Conda 环境：`ad-l`，由 `agentdropout` 克隆后安装新框架依赖。
 - 原项目 `/Users/tpx-198/code/AgentDropout` 作为只读参考与实验对照。
-- 已完成模型适配器、固定图、GSM8K 批量基线、多步拓扑训练与恢复、学习后评测、独立边剪枝与配对评测，以及训练中的周期边剪枝；节点剪枝与逐轮独立参数待后续迁移。
+- 已完成 GSM8K 批量基线、共享及逐轮独立拓扑训练与恢复、周期及独立边剪枝、节点选择训练和剪枝配对评测。
 
 ## 安装与环境
 
@@ -101,7 +101,7 @@ python train.py --steps 6 --prune-every 2 --prune-until 4
 python train.py --diff --steps 6 --prune-every 2 --prune-until 4
 ```
 
-两轮空间参数与跨轮时间参数独立，周期剪枝也按每张矩阵分别执行。续训自动继承模式，现有评测、独立剪枝入口自动识别检查点。仍为两个智能体、两轮、每题 5 次调用；节点剪枝尚待迁移。另已修正正则约束的参考矩阵，使剪枝前后始终参照初始配置，与原脚本一致。详见 [每轮独立拓扑](docs/topology-training.md)。
+两轮空间参数与跨轮时间参数独立，周期剪枝也按每张矩阵分别执行。续训自动继承模式，现有评测、独立剪枝入口自动识别检查点。默认两节点配置下，单独剪边后每题仍为 5 次调用。正则约束始终参照初始配置，与原脚本一致。详见 [每轮独立拓扑](docs/topology-training.md)。
 
 已有检查点的独立剪枝和配对评测：
 
@@ -110,6 +110,26 @@ python prune.py --checkpoint results/topology/gsm8k-demo/checkpoint.pt
 ```
 
 默认按原规则剪除低权重候选边，在同一批 10 道 test 题上用相同的固定推理模式对比剪枝前后。默认模拟；添加 `--deepseek` 明确允许最多 100 次真实调用，`--plan` 只查看计划，`--prune-only` 只保存剪枝产物。结果保存在 `results/pruning/`，原检查点保持只读。详见 [边剪枝说明](docs/edge-pruning.md)。
+
+## 节点剪枝
+
+```bash
+python nodes.py
+```
+
+默认使用模拟响应，在 GSM8K train 上训练独立的节点选择权重，再在同一批 test 题上比较剪枝前后。每轮跳过一名智能体，保留最终汇总，每题调用从 5 次降为 3 次。结果写入 `results/node_pruning/`。选择规则、运行参数与两节点限制见 [节点剪枝说明](docs/node-pruning.md)。
+
+使用 `python train.py --node-pruning 路径/pruning.json` 可在剪枝后的候选图上训练边权重。检查点保留节点跳过计划，续训、学习后评测与独立边剪枝自动继承。
+
+三节点示例加入原项目的 Inspector：
+
+```bash
+python nodes.py --config configs/three_agents_offline.json --initial-probability 0.3
+```
+
+两轮完整运行每题调用 7 次，逐轮剪去一个节点后每题调用 5 次。三节点配置及边训练命令见 [节点剪枝说明](docs/node-pruning.md)。
+
+添加 `--compare-random` 可在同一批测试题上对照完整图、随机剪枝与学习后剪枝。随机与学习后两组的调用预算相同，可用 `--plan` 查看训练和各组的调用上限。
 
 ## 依赖记录
 
@@ -130,7 +150,7 @@ python prune.py --checkpoint results/topology/gsm8k-demo/checkpoint.pt
 ## 下一步
 
 1. 按明确的样本规模运行真实 GSM8K 基线，扩展固定图规模与其余角色。
-2. 在逐轮独立参数与周期边剪枝基础上，迁移节点选择权重训练、节点剪枝与跳过执行。
+2. 用真实模型和多个随机计划评估三节点剪枝的准确率与 Token 用量。
 3. 在一致评测条件下与原项目比较正确率、Token、耗时。
 
 需要真实 API 时，将 `.env.example` 复制为 `.env` 并填写配置；运行入口仅在显式选择真实后端后加载该文件。未复制原项目密钥。

@@ -9,9 +9,12 @@ from ad_l.models import ModelAdapter, ModelSettings
 
 
 def topology_training_step(policy, optimizer, config, examples, *, generator, temperature=1.0, delta=0.1,
-                           include_regularization=True, settings=None, adapter_factory=None, allow_real_api=False):
+                           include_regularization=True, settings=None, adapter_factory=None, allow_real_api=False,
+                           skip_nodes=(None, None)):
     if not examples:
         raise ValueError("至少需要一道离线训练题")
+    if policy.node_ids != config.node_ids:
+        raise ValueError("策略与配置的节点顺序不一致")
     settings = settings or ModelSettings()
     if settings.backend != "mock" and not allow_real_api:
         raise ValueError("真实训练需要显式启用")
@@ -31,16 +34,17 @@ def topology_training_step(policy, optimizer, config, examples, *, generator, te
             # 这里只传普通边数据；log_prob 不进入 LangGraph state、JSON 或检查点。
             adapters = None
             if adapter_factory is not None:
-                adapters = {node: adapter_factory() for node in ("A", "B", "final")}
+                adapters = {node: adapter_factory() for node in (*config.node_ids, "final")}
                 if any(not isinstance(adapter, ModelAdapter) or adapter.settings != settings for adapter in adapters.values()):
                     raise ValueError("训练适配器必须与统一模型配置一致")
             graph = build_fixed_graph(config, adapters, allow_real_api=allow_real_api,
-                                      round_topologies=[item.for_execution() for item in sampled])
+                                      round_topologies=[item.for_execution() for item in sampled], skip_nodes=skip_nodes)
             state = graph.invoke({"task": example["task"]})
             if state["status"] != "success":
                 episodes.append({"sample_id": example["sample_id"], "data_split": example.get("data_split", "synthetic_train"),
                                  "task": example["task"], "target": example["target"], "status": "failed",
-                                 "trace": state["trace"], "round_outputs": state["round_outputs"], "setup_error": state.get("setup_error"),
+                                 "trace": state["trace"], "round_outputs": state["round_outputs"],
+                                 "skipped_nodes": state["skipped_nodes"], "setup_error": state.get("setup_error"),
                                  "sampled_rounds": [item.for_report() for item in sampled],
                                  "model_calls": state["model_calls"], "real_api_calls": state["real_api_calls"]})
                 for episode, previous_sample in zip(episodes[:-1], samples):
@@ -53,7 +57,7 @@ def topology_training_step(policy, optimizer, config, examples, *, generator, te
             log_probs.append(torch.stack([item.log_prob for item in sampled]).sum())
             episodes.append({"sample_id": example["sample_id"], "data_split": example.get("data_split", "synthetic_train"),
                              "task": example["task"], "target": example["target"], **score,
-                             "answer": state["answer"], "trace": state["trace"],
+                             "answer": state["answer"], "trace": state["trace"], "skipped_nodes": state["skipped_nodes"],
                              "round_outputs": state["round_outputs"], "model_calls": state["model_calls"],
                              "real_api_calls": state["real_api_calls"]})
             samples.append(sampled)
