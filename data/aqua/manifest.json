@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "dataset": "aqua",
+  "sources": [
+    {
+      "source_split": "train",
+      "url": "https://raw.githubusercontent.com/google-deepmind/AQuA/master/train.json",
+      "sha256": "35b70c7cb1660c34d302bb932dfd3656ce3d05e8c982c797767fec31d7d1e0ba",
+      "bytes": 47570935
+    },
+    {
+      "source_split": "validation",
+      "url": "https://raw.githubusercontent.com/google-deepmind/AQuA/master/dev.json",
+      "sha256": "4a52301d8a49ae0b286f8e697f9c5da1b109b247b825b47b4c6de34312dceec5",
+      "bytes": 132008
+    },
+    {
+      "source_split": "test",
+      "url": "https://raw.githubusercontent.com/google-deepmind/AQuA/master/test.json",
+      "sha256": "de41581881ef95c5588c44ddc701c77fd480839241dd422a0d181262af24520c",
+      "bytes": 130192
+    },
+    {
+      "source_split": "license",
+      "url": "https://raw.githubusercontent.com/google-deepmind/AQuA/master/LICENSE",
+      "sha256": "189bff4f09eccdbc1790f7a9085ddd031ddf050f27929608fa4ba8a57e14a7c3",
+      "bytes": 552
+    }
+  ],
+  "split_policy": {
+    "kind": "official",
+    "excluded_train_overlap": 0
+  },
+  "prepared_at_utc": "2026-11-13T07:13:43.426531+00:00",
+  "splits": {
+    "train": {
+      "file": "train.jsonl",
+      "records": 97467,
+      "sha256": "d8179b62ef32ec5bd12da9c3b8e742857bcffb95cec89833c580221f4e085333"
+    },
+    "validation": {
+      "file": "validation.jsonl",
+      "records": 254,
+      "sha256": "d33afef066d9494ed2e7b4aa4e7b9762f648b947cd8c34a8786318780c97dd13"
+    },
+    "test": {
+      "file": "test.jsonl",
+      "records": 254,
+      "sha256": "a7e18ba3c473bbfa930b1564d4d225096dae2052aec486ba9655da773b3dc58b"
+    }
+  }
+}

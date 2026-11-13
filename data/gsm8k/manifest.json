@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "dataset": "gsm8k",
+  "sources": [
+    {
+      "source_split": "train",
+      "url": "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/train.jsonl",
+      "sha256": "17f347dc51477c50d4efb83959dbb7c56297aba886e5544ee2aaed3024813465",
+      "bytes": 4166206
+    },
+    {
+      "source_split": "test",
+      "url": "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test.jsonl",
+      "sha256": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14",
+      "bytes": 749738
+    }
+  ],
+  "split_policy": {
+    "kind": "official"
+  },
+  "splits": {
+    "train": {
+      "file": "train.jsonl",
+      "records": 7473,
+      "sha256": "17f347dc51477c50d4efb83959dbb7c56297aba886e5544ee2aaed3024813465"
+    },
+    "test": {
+      "file": "test.jsonl",
+      "records": 1319,
+      "sha256": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14"
+    }
+  }
+}

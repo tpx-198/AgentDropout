@@ -1,4 +1,4 @@
-"""Train and prune communication edge probabilities using GSM8K train rewards."""
+"""Train and prune edge probabilities on selected or mixed reasoning benchmarks."""
 
 import argparse
 import json
@@ -13,13 +13,17 @@ from ad_l.cli import ROOT, add_arguments, adapters_from_args, print_plan, resolv
 from ad_l.roles import PROMPTS
 from ad_l.topology import save_policy
 from ad_l.training import load_examples, train_step
+from ad_l.datasets import DATASETS, load_training_mix
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     add_arguments(parser)
-    parser.add_argument("--data", type=Path, default=ROOT / "data/gsm8k/train.jsonl")
-    parser.add_argument("--limit", type=int, default=6)
+    data_source = parser.add_mutually_exclusive_group()
+    data_source.add_argument("--data", type=Path, help="One legacy GSM8K or normalized training JSONL file")
+    data_source.add_argument("--datasets", choices=DATASETS, nargs="+", help="Datasets to mix; default all four")
+    parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
+    parser.add_argument("--limit", type=int, default=6, help="Selected training questions per dataset")
     parser.add_argument("--steps", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--lr", type=float, default=0.05)
@@ -39,7 +43,10 @@ def main():
         if args.output.exists():
             raise ValueError("output already exists; choose a new file")
         policy, team = resolve_policy(args)
-        examples, dataset = load_examples(args.data, args.limit, args.seed)
+        if args.data is not None:
+            examples, dataset = load_examples(args.data, args.limit, args.seed)
+        else:
+            examples, dataset = load_training_mix(args.data_dir, args.datasets or DATASETS, args.limit, args.seed)
         plan = print_plan(policy, team, args.steps * args.batch_size)
         plan["planned_real_api_calls"] = plan["planned_model_calls"] if args.deepseek else 0
         plan["dataset"] = dataset

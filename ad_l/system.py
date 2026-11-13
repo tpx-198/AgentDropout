@@ -16,6 +16,7 @@ from ad_l.topology import topological_order
 
 class TeamState(TypedDict, total=False):
     task: str
+    answer_type: str
     current: dict
     previous: dict
     round_outputs: list
@@ -68,6 +69,8 @@ def build_system(team: tuple[Agent, ...], execution: dict, adapters: dict[str, M
     def initialize(state):
         if not isinstance(state.get("task"), str) or not state["task"].strip():
             raise ValueError("task must be a nonempty string")
+        if state.get("answer_type", "numeric") not in {"numeric", "choice"}:
+            raise ValueError("answer_type must be numeric or choice")
         return {"current": {}, "previous": {}, "round_outputs": [], "trace": [],
                 "answer": "", "status": "running", "model_calls": 0, "real_api_calls": 0, "usage": None}
 
@@ -85,12 +88,12 @@ def build_system(team: tuple[Agent, ...], execution: dict, adapters: dict[str, M
             if final:
                 spatial = visible(state["previous"], execution["summary"])
                 temporal = {}
-                messages = decision_messages(state["task"], spatial)
+                messages = decision_messages(state["task"], spatial, state.get("answer_type", "numeric"))
             else:
                 graph = execution["rounds"][round_index]
                 spatial = visible(state["current"], [source for source, target in graph["spatial"] if target == worker_index])
                 temporal = visible(state["previous"], [source for source, target in graph["temporal"] if target == worker_index])
-                messages = worker_messages(state["task"], agent.role, spatial, temporal)
+                messages = worker_messages(state["task"], agent.role, spatial, temporal, state.get("answer_type", "numeric"))
             return messages, spatial, temporal
 
         def complete(state, messages, spatial, temporal, started, response=None, error=None):

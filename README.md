@@ -21,14 +21,27 @@ python run.py --topology layered --layers 2 --async
 
 全连接、随机、分层拓扑和边采样参考论文第 3.3 节与附录 A.4。链式、星形和辩论式用于扩展实验。[AgentDropout 论文](https://aclanthology.org/2025.acl-long.1170.pdf)
 
-训练入口使用本地 GSM8K train 数据，以最终数值答案是否正确作为奖励，执行 REINFORCE，再按各轮矩阵内最低权重剪除指定比例的候选边。
+训练入口默认混合本地 GSM8K、AQuA、SVAMP 和 MultiArith 的 train 数据，以最终答案是否正确作为奖励，执行 REINFORCE，再按各轮矩阵内最低权重剪除指定比例的候选边。数值题比较数值答案，AQuA 比较选项字母，提示词随题型调整。
 
 ```bash
 python train.py --steps 3 --batch-size 2 --limit 6 --prune-rate 0.25
+python train.py --datasets gsm8k aqua --limit 10 --output checkpoints/gsm8k-aqua.pt
+python train.py --datasets svamp --limit 20 --output checkpoints/svamp.pt
 python run.py --checkpoint checkpoints/topology.pt
 python run.py --checkpoint checkpoints/topology.pt --mode threshold --threshold 0.5
 python run.py --mode fixed --output results/run.json
 ```
+
+`--datasets` 选择训练来源，默认使用四类数据。`--limit` 表示每个数据集的抽样题数，默认每类 6 题，组成 24 题样本池，按数据集轮流取题。实际训练题次为 `--steps × --batch-size`，超过样本池大小时循环使用。随机种子控制样本选择。原有 `--data data/gsm8k/train.jsonl` 单文件方式继续可用，与 `--datasets` 互斥。
+
+数据目录同时提供训练与评测文件。GSM8K 和 AQuA 沿用官方划分，AQuA 还提供 validation。SVAMP 和 MultiArith 使用固定种子 0、按相同题目分组的 80%/20% 本地实验划分。训练入口检查 split 和数据指纹，拒绝 test、validation 文件。各数据集的来源、规模和划分说明见 [数据说明](data/README.md)。
+
+```bash
+python prepare_data.py
+python train.py --datasets gsm8k aqua svamp multiarith --plan
+```
+
+`prepare_data.py` 下载缺失的数据并保存来源 URL、原文件与输出文件的 SHA-256。已经准备好的数据只进行本地校验。
 
 剪枝数量为每张矩阵有效边数乘 `--prune-rate` 后向下取整，剪除边的权重为 0，后续训练不会重新启用。检查点保存参数、配置、数据指纹、抽样清单、提示词来源、逐步运行记录和模型用量。每步更新后保存，模型调用失败时保留之前成功更新的权重。`--output` 指定新路径以开展独立实验。
 

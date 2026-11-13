@@ -28,7 +28,7 @@ def create_team(total_agents: int = 5, roles: list[str] | None = None) -> tuple[
     return (*workers, Agent("final", "FinalRefer"))
 
 
-def worker_messages(task: str, role: str, spatial: dict, temporal: dict):
+def worker_messages(task: str, role: str, spatial: dict, temporal: dict, answer_type="numeric"):
     prompt = PROMPTS["roles"][role]
     user = f"{prompt['few_shot']}\n\nQ:{task}"
     for label, visible in (("Current round", spatial), ("Previous round", temporal)):
@@ -38,11 +38,17 @@ def worker_messages(task: str, role: str, spatial: dict, temporal: dict):
                 for node_id, info in visible.items()
             )
             user += f"\n\n{label} responses for reference\n{text}"
-    return [SystemMessage(content=prompt["system"]), HumanMessage(content=user)]
+    system = prompt["system"]
+    if answer_type == "choice":
+        system += "\nFor this multiple-choice task, end with The answer is <option letter>, such as The answer is A."
+    return [SystemMessage(content=system), HumanMessage(content=user)]
 
 
-def decision_messages(task: str, visible: dict):
+def decision_messages(task: str, visible: dict, answer_type="numeric"):
     prompt = PROMPTS["decision"]
     text = "\n\n".join(f"{node_id}: {info['output']}" for node_id, info in visible.items())
     user = f"{prompt['few_shot']}\nThe task is\n{task}\nFinal-round agent outputs\n{text}"
-    return [SystemMessage(content=prompt["system"]), HumanMessage(content=user)]
+    system = prompt["system"]
+    if answer_type == "choice":
+        system += "\nFor this multiple-choice task, the final line must be The answer is <option letter>, such as The answer is A."
+    return [SystemMessage(content=system), HumanMessage(content=user)]

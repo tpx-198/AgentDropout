@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "dataset": "svamp",
+  "sources": [
+    {
+      "source_split": "all",
+      "url": "https://raw.githubusercontent.com/arkilpatel/SVAMP/main/SVAMP.json",
+      "sha256": "5be77703a6d891ae476d7c082787ad361392aa02453b132516cdd5f4e7934e3e",
+      "bytes": 339970
+    },
+    {
+      "source_split": "license",
+      "url": "https://raw.githubusercontent.com/arkilpatel/SVAMP/main/LICENSE",
+      "sha256": "07ce3a34de7a865345634f9278bc26ddcacc2d0defd348c28e3f4603448b9ba4",
+      "bytes": 1068
+    }
+  ],
+  "split_policy": {
+    "kind": "local_grouped_holdout",
+    "seed": 0,
+    "train_group_fraction": 0.8,
+    "note": "Local experimental split of the full benchmark, not the published evaluation split"
+  },
+  "prepared_at_utc": "2026-11-13T07:13:49.562842+00:00",
+  "splits": {
+    "train": {
+      "file": "train.jsonl",
+      "records": 800,
+      "sha256": "3dd8c53f76a827e4bc83733eb43c2dfaf8b523c3883fd5f4d77f5007d6283767"
+    },
+    "test": {
+      "file": "test.jsonl",
+      "records": 200,
+      "sha256": "861f1b40aea2d9bb3e2356b61e8de848ee6b5049eae72bba1e5874b1bf8d3062"
+    }
+  }
+}

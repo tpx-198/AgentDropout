@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "dataset": "multiarith",
+  "sources": [
+    {
+      "source_split": "all",
+      "url": "https://raw.githubusercontent.com/AGI-Edgerunners/LLM-Adapters/main/dataset/MultiArith/MultiArith.json",
+      "sha256": "dc9db1b6cc68b1ecc2dec830d15aaf8c9a0932aa31d5ffce88ef3628179d36f4",
+      "bytes": 254012
+    }
+  ],
+  "split_policy": {
+    "kind": "local_grouped_holdout",
+    "seed": 0,
+    "train_group_fraction": 0.8,
+    "note": "Local experimental split of the full benchmark, not the published evaluation split"
+  },
+  "prepared_at_utc": "2026-11-13T07:13:53.549624+00:00",
+  "splits": {
+    "train": {
+      "file": "train.jsonl",
+      "records": 479,
+      "sha256": "8fa46077c2329e52e5bc53b90937e232c7fbf8814cac15994976ddec1927aaa5"
+    },
+    "test": {
+      "file": "test.jsonl",
+      "records": 121,
+      "sha256": "83934040c35c9cacabc7b58dce706377ce8ad9ebfcd071d723cc0ec4cf74f95f"
+    }
+  }
+}
