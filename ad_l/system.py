@@ -52,7 +52,8 @@ def validate_execution(execution: dict, workers: int):
     return orders
 
 
-def build_system(team: tuple[Agent, ...], execution: dict, adapters: dict[str, ModelAdapter], *, allow_real_api=False):
+def build_system(team: tuple[Agent, ...], execution: dict, adapters: dict[str, ModelAdapter], *,
+                 allow_real_api=False, should_stop=None):
     if (len(team) < 2 or team[-1].role != "FinalRefer"
             or len({agent.node_id for agent in team}) != len(team)):
         raise ValueError("A team requires unique IDs and a final decision-maker")
@@ -123,6 +124,8 @@ def build_system(team: tuple[Agent, ...], execution: dict, adapters: dict[str, M
             return update
 
         def invoke(state):
+            if should_stop is not None and should_stop():
+                return {"status": "cancelled"}
             messages, spatial, temporal = prepare(state)
             started = perf_counter()
             try:
@@ -132,6 +135,8 @@ def build_system(team: tuple[Agent, ...], execution: dict, adapters: dict[str, M
             return complete(state, messages, spatial, temporal, started, response=response)
 
         async def ainvoke(state):
+            if should_stop is not None and should_stop():
+                return {"status": "cancelled"}
             messages, spatial, temporal = prepare(state)
             started = perf_counter()
             try:
@@ -154,11 +159,11 @@ def build_system(team: tuple[Agent, ...], execution: dict, adapters: dict[str, M
         for worker_index in order:
             name = f"round_{round_index + 1}_{workers[worker_index].node_id}"
             builder.add_node(name, call_node(round_index, worker_index))
-            builder.add_conditional_edges(previous, lambda state: state["status"] == "failed", {True: END, False: name})
+            builder.add_conditional_edges(previous, lambda state: state["status"] in {"failed", "cancelled"}, {True: END, False: name})
             previous = name
         name = f"commit_{round_index + 1}"
         builder.add_node(name, commit)
-        builder.add_conditional_edges(previous, lambda state: state["status"] == "failed", {True: END, False: name})
+        builder.add_conditional_edges(previous, lambda state: state["status"] in {"failed", "cancelled"}, {True: END, False: name})
         previous = name
     builder.add_node("final", call_node(len(orders) - 1))
     builder.add_edge(previous, "final")

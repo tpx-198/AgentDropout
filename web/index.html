@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AD-L · 多智能体评测平台</title>
+<link rel="stylesheet" href="/style.css">
+<script src="/app.js" defer>
+</script>
+</head>
+<body>
+<aside class="sidebar">
+<a class="brand" href="/" aria-label="AD-L 首页">
+<span class="brand-mark">a<span>·</span>
+</span>
+<span>AD-L<span class="brand-sub">AGENT RESEARCH LAB</span>
+</span>
+</a>
+<div class="nav-caption">实验空间</div>
+<nav aria-label="主导航">
+<button class="nav-item active" data-page="workspace" aria-label="实验工作台">
+<span class="nav-icon">◈</span><span class="nav-label">实验工作台</span></button>
+<button class="nav-item" data-page="models" aria-label="智能体与模型">
+<span class="nav-icon">⌘</span><span class="nav-label">智能体与模型</span><span class="nav-count" id="nav-agent-count">5</span>
+</button>
+<button class="nav-item" data-page="experiments" aria-label="训练与评测">
+<span class="nav-icon">▷</span><span class="nav-label">训练与评测</span></button>
+<button class="nav-item" data-page="history" aria-label="运行记录">
+<span class="nav-icon">◷</span><span class="nav-label">运行记录</span><span class="nav-count" id="nav-job-count">0</span>
+</button>
+</nav>
+<div class="sidebar-note">
+<span class="eyebrow">CURRENT WORKSPACE</span>
+<strong>AD-L 本地项目</strong>
+<span>LangGraph × PyTorch</span>
+</div>
+<div class="sidebar-bottom">
+<span class="status-dot">
+</span>
+<span id="connection-status">正在连接本地引擎</span>
+<small>LOCAL WORKSPACE</small>
+</div>
+</aside>
+<div class="app-shell">
+<header class="topbar">
+<div>
+<span class="muted">实验空间</span>
+<span class="breadcrumb-divider">/</span>
+<span id="breadcrumb">实验工作台</span>
+</div>
+<div class="topbar-right">
+<span id="dirty-status" class="muted">配置已同步</span>
+<button class="button small" id="save-top">保存配置</button>
+<span class="avatar">研</span>
+</div>
+</header>
+<main>
+<section id="page-workspace" class="page">
+<div class="page-heading">
+<div>
+<span class="eyebrow">EXPERIMENT WORKSPACE</span>
+<h1>多智能体实验工作台</h1>
+<p>配置协作团队与通信结构，训练、比较并记录每一次实验。</p>
+</div>
+<button class="button primary" id="go-experiments">创建实验 <span>↗</span>
+</button>
+</div>
+<div class="stat-grid">
+<div class="stat-card">
+<span>团队规模</span>
+<strong>
+<span id="stat-agents">5</span>
+<small>个智能体</small>
+</strong>
+<div>包含 1 个最终汇总者</div>
+</div>
+<div class="stat-card">
+<span>讨论轮数</span>
+<strong>
+<span id="stat-rounds">2</span>
+<small>轮</small>
+</strong>
+<div>轮内协作与跨轮信息传递</div>
+</div>
+<div class="stat-card">
+<span>每题模型调用</span>
+<strong>
+<span id="stat-calls">9</span>
+<small>次</small>
+</strong>
+<div id="stat-call-formula">4 个讨论节点 × 2 轮 + 1</div>
+</div>
+<div class="stat-card">
+<span>可用数据集</span>
+<strong>
+<span id="stat-datasets">4</span>
+<small>类</small>
+</strong>
+<div>数学推理 · 数值与选择题</div>
+</div>
+</div>
+<div class="workspace-grid">
+<article class="card graph-card">
+<div class="card-header">
+<div>
+<span class="eyebrow">COMMUNICATION GRAPH</span>
+<h2>通信拓扑预览</h2>
+</div>
+<div class="graph-tools">
+<span class="badge teal" id="graph-label">全连接候选图</span>
+<select id="preview-round" aria-label="预览讨论轮次">
+</select>
+<button class="icon-button" id="refresh-preview" aria-label="刷新拓扑">↻</button>
+</div>
+</div>
+<div class="graph-stage">
+<svg id="topology-svg" viewBox="0 0 700 360" role="group" aria-label="智能体通信图">
+</svg>
+<span class="graph-caption">点击节点配置对应智能体</span>
+</div>
+<div class="graph-footer">
+<span>
+<i class="legend-line">
+</i>轮内通信</span>
+<span>
+<i class="legend-line dashed">
+</i>最终汇总</span>
+<span id="graph-edge-count" class="muted">正在构建连接…</span>
+</div>
+<p class="graph-note" id="graph-note">预览展示保留候选边对应的无环执行图，运行时按边权重采样。</p>
+</article>
+<article class="card settings-card">
+<div class="card-header">
+<div>
+<span class="eyebrow">TEAM & TOPOLOGY</span>
+<h2>团队与结构</h2>
+</div>
+<span class="badge neutral">可配置</span>
+</div>
+<div class="card-body form-stack">
+<div class="two-columns">
+<label>智能体总数<input id="agents" type="number" min="2" max="32" value="5">
+</label>
+<label>讨论轮数<input id="rounds" type="number" min="1" max="10" value="2">
+</label>
+</div>
+<label>轮内候选拓扑<select id="topology">
+<option value="full">全连接 Full</option>
+<option value="random">随机 Random</option>
+<option value="layered">分层 Layered</option>
+<option value="chain">链式 Chain</option>
+<option value="star">星形 Star</option>
+<option value="debate">辩论式 Debate</option>
+</select>
+</label>
+<label>跨轮连接<select id="temporal">
+<option value="upper">编号递增 Upper</option>
+<option value="full">全部节点 Full</option>
+<option value="self">仅自身 Self</option>
+<option value="none">关闭 None</option>
+</select>
+</label>
+<label>初始边权重 <span class="field-value" id="weight-value">0.50</span>
+<input id="initial-weight" type="range" min="0.05" max="0.95" step="0.05" value="0.5">
+</label>
+<div class="two-columns">
+<label>随机种子<input id="seed" type="number" value="0">
+</label>
+<label>采样温度<input id="sampling-temperature" type="number" min="0.01" step="0.1" value="1">
+</label>
+</div>
+<div class="two-columns">
+<label>随机图密度<input id="density" type="number" min="0" max="1" step="0.1" value="0.5">
+</label>
+<label>分层层数<input id="layers" type="number" min="1" max="32" value="2">
+</label>
+</div>
+</div>
+</article>
+</div>
+<div class="quick-actions">
+<button class="action-card" data-action="train">
+<span class="action-icon">↗</span>
+<span>
+<strong>训练通信拓扑</strong>
+<small>通过任务奖励学习边权重，按比例剪枝</small>
+</span>
+<span>→</span>
+</button>
+<button class="action-card" data-action="evaluate">
+<span class="action-icon purple">◎</span>
+<span>
+<strong>评测协作表现</strong>
+<small>在测试集比较初始与训练后的通信图</small>
+</span>
+<span>→</span>
+</button>
+</div>
+<article class="card dataset-overview">
+<div class="card-header">
+<h2>数据集概览</h2>
+<span class="muted">训练与测试划分独立</span>
+</div>
+<div class="table-wrap">
+<table>
+<thead>
+<tr>
+<th>数据集</th>
+<th>训练样本</th>
+<th>测试样本</th>
+<th>任务类型</th>
+<th>数据状态</th>
+</tr>
+</thead>
+<tbody id="dataset-table">
+</tbody>
+</table>
+</div>
+</article>
+</section>
+<section id="page-models" class="page" hidden>
+<div class="page-heading">
+<div>
+<span class="eyebrow">AGENTS & MODELS</span>
+<h1>智能体与模型</h1>
+<p>为每个角色单独选择服务、模型和 API 密钥。</p>
+</div>
+<button class="button" id="import-config">导入现有 API 配置</button>
+</div>
+<div class="info-banner">
+<span>◈</span>
+<div>
+<strong>配置保存在本机</strong>
+<p>密钥使用本机受限文件保存，页面只显示保存状态。留空可沿用已有密钥。</p>
+</div>
+<button class="button primary" id="save-models">保存模型配置</button>
+</div>
+<div id="model-cards" class="model-grid">
+</div>
+</section>
+<section id="page-experiments" class="page" hidden>
+<div class="page-heading">
+<div>
+<span class="eyebrow">TRAIN & EVALUATE</span>
+<h1>训练与评测</h1>
+<p>选择数据与运行参数，任务进度和结果将在下方实时更新。</p>
+</div>
+<span class="badge teal" id="run-environment">本地模拟</span>
+</div>
+<div class="experiment-tabs" role="tablist" aria-label="实验类型">
+<button class="experiment-tab active" data-kind="train" role="tab">拓扑训练</button>
+<button class="experiment-tab" data-kind="evaluate" role="tab">测试集评测</button>
+</div>
+<div class="experiment-grid">
+<article class="card">
+<div class="card-header">
+<h2 id="experiment-form-title">训练配置</h2>
+<span class="muted" id="split-label">TRAIN SPLIT</span>
+</div>
+<div class="card-body form-stack">
+<div id="training-fields">
+<label>训练数据集</label>
+<div id="train-datasets" class="dataset-choices">
+</div>
+<div class="three-columns">
+<label>每类抽样题数<input id="train-limit" type="number" min="1" max="1000" value="6">
+</label>
+<label>训练步数<input id="train-steps" type="number" min="1" max="1000" value="3">
+</label>
+<label>每步批大小<input id="batch-size" type="number" min="1" max="64" value="2">
+</label>
+</div>
+<div class="three-columns">
+<label>学习率<input id="learning-rate" type="number" min="0.00001" step="0.01" value="0.05">
+</label>
+<label>稀疏正则系数<input id="sparsity" type="number" min="0" step="0.01" value="0.01">
+</label>
+<label>剪枝比例<input id="prune-rate" type="number" min="0" max="1" step="0.05" value="0.25">
+</label>
+</div>
+<p class="helper">各数据集按轮流取题组成训练池。训练完成后保存剪枝后的拓扑检查点。</p>
+</div>
+<div id="evaluation-fields" hidden>
+<label>评测数据集</label>
+<div id="eval-datasets" class="dataset-choices">
+</div>
+<div class="checkpoint-row">
+<label>拓扑来源<select id="checkpoint">
+<option value="">当前初始拓扑</option>
+</select>
+</label>
+<button class="button small" id="apply-checkpoint">应用检查点设置</button>
+</div>
+<div class="three-columns">
+<label>每类测试题数<input id="eval-limit" type="number" min="1" max="1000" value="5">
+</label>
+<label>推理方式<select id="eval-mode">
+<option value="sampled">按权重采样</option>
+<option value="fixed">保留全部有效边</option>
+<option value="threshold">按权重阈值</option>
+</select>
+</label>
+<label>边权重阈值<input id="eval-threshold" type="number" min="0" max="1" step="0.05" value="0.5">
+</label>
+</div>
+<label class="checkbox-label">
+<input id="compare" type="checkbox" checked> 使用已训练检查点时，与初始拓扑进行同题对照</label>
+<p class="helper">评测冻结拓扑参数，并使用独立测试划分。相同模式、样本和种子用于对照。</p>
+</div>
+</div>
+</article>
+<article class="card execution-card">
+<div class="card-header">
+<h2>运行计划</h2>
+<span class="badge neutral" id="budget-backend">MOCK</span>
+</div>
+<div class="card-body">
+<div class="budget-number">
+<span>预计模型调用上限</span>
+<strong id="budget-total">54<small>次</small>
+</strong>
+</div>
+<div class="budget-details">
+<div>
+<span>智能体 / 轮数</span>
+<strong id="budget-team">5 / 2</strong>
+</div>
+<div>
+<span>执行答题次数</span>
+<strong id="budget-examples">6</strong>
+</div>
+<div>
+<span>真实 API 调用上限</span>
+<strong id="budget-real">0</strong>
+</div>
+</div>
+<label class="checkbox-label real-consent" id="real-consent">
+<input type="checkbox" id="allow-real-api">本次任务允许真实 API 调用</label>
+<p class="helper" id="budget-note">模拟回答用于验证流程，结果标记为模拟诊断。</p>
+<button class="button primary full-width" id="start-job">开始拓扑训练 <span>↗</span>
+</button>
+<button class="button text full-width" id="check-plan">核对数据与调用计划</button>
+</div>
+</article>
+</div>
+<article class="card job-panel" id="job-panel" hidden>
+<div class="card-header">
+<div>
+<span class="eyebrow">EXPERIMENT RESULT</span>
+<h2 id="job-name">任务进度</h2>
+</div>
+<div class="job-actions">
+<span class="badge" id="job-status">
+</span>
+<button class="button small" id="cancel-job">取消任务</button>
+<a class="button small" id="download-result">导出结果</a>
+<a class="button small" id="download-checkpoint" hidden>下载检查点</a>
+</div>
+</div>
+<div class="card-body">
+<div class="progress-label">
+<span id="job-message">
+</span>
+<span id="job-progress-label">
+</span>
+</div>
+<progress id="job-progress" max="1" value="0">
+</progress>
+<div class="result-stat-grid" id="result-stats">
+</div>
+<div id="comparison-table">
+</div>
+<div id="loss-area" hidden>
+<h3>训练损失</h3>
+<svg id="loss-chart" viewBox="0 0 900 150" role="img" aria-label="训练损失曲线">
+</svg>
+</div>
+<div class="table-wrap">
+<table>
+<thead>
+<tr>
+<th>样本 / 数据集</th>
+<th>实验组</th>
+<th>标准答案</th>
+<th>预测答案</th>
+<th>状态</th>
+<th>耗时</th>
+</tr>
+</thead>
+<tbody id="result-rows">
+</tbody>
+</table>
+</div>
+<p class="helper" id="rows-note">点击样本行查看完整回答与逐节点调用记录。</p>
+</div>
+</article>
+<div class="empty-state" id="no-job">
+<span>◎</span>
+<h3>准备开始一次实验</h3>
+<p>配置参数后点击开始，训练曲线和逐题结果会显示在这里。</p>
+</div>
+</section>
+<section id="page-history" class="page" hidden>
+<div class="page-heading">
+<div>
+<span class="eyebrow">EXPERIMENT HISTORY</span>
+<h1>运行记录</h1>
+<p>查看实验状态、恢复已保存的结果，或选择训练后的拓扑继续评测。</p>
+</div>
+<button class="button" id="refresh-history">刷新记录</button>
+</div>
+<div id="history-list" class="history-list">
+</div>
+</section>
+</main>
+<footer class="app-footer">
+<span>AD-L / Multi-Agent Evaluation Platform</span>
+<span>本地执行 · 配置与实验结果保存在当前项目</span>
+</footer>
+</div>
+<div id="toast" role="status" class="toast" hidden>
+</div>
+<dialog id="detail-dialog">
+<div class="dialog-header">
+<h2 id="detail-title">样本详情</h2>
+<button class="icon-button" id="close-dialog" aria-label="关闭详情">×</button>
+</div>
+<div id="detail-content">
+</div>
+</dialog>
+</body>
+</html>

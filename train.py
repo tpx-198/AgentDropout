@@ -14,6 +14,7 @@ from ad_l.roles import PROMPTS
 from ad_l.topology import save_policy
 from ad_l.training import load_examples, train_step
 from ad_l.datasets import DATASETS, load_training_mix
+from ad_l.model_config import load_agent_config, model_call_plan
 
 
 def main():
@@ -43,6 +44,7 @@ def main():
         if args.output.exists():
             raise ValueError("output already exists; choose a new file")
         policy, team = resolve_policy(args)
+        agent_config = load_agent_config(args.api_config, team) if args.api_config else None
         if args.data is not None:
             examples, dataset = load_examples(args.data, args.limit, args.seed)
         else:
@@ -51,10 +53,12 @@ def main():
         plan["planned_real_api_calls"] = plan["planned_model_calls"] if args.deepseek else 0
         plan["dataset"] = dataset
         plan["sample_ids"] = [example.sample_id for example in examples]
+        if agent_config is not None:
+            plan.update(model_call_plan(agent_config, team, policy.config.rounds, args.steps * args.batch_size))
         if args.plan:
             print(json.dumps(plan, ensure_ascii=False, indent=2))
             return
-        adapters, settings = adapters_from_args(args, team)
+        adapters, settings = adapters_from_args(args, team, agent_config)
     except (OSError, ValueError, KeyError) as error:
         parser.error(str(error))
     except Exception as error:
@@ -62,16 +66,20 @@ def main():
     generator = torch.Generator().manual_seed(args.seed)
     optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr)
     history = []
-    metadata = {**plan, "settings": asdict(settings), "roles": [agent.role for agent in team[:-1]],
+    backends = {value.backend for value in settings.values()}
+    metrics_kind = "mock_diagnostic" if backends == {"mock"} else (
+        "mixed_backend_diagnostic" if "mock" in backends else "model_training")
+    metadata = {**plan, "settings": {node: asdict(value) for node, value in settings.items()},
+                "roles": [agent.role for agent in team[:-1]],
                 "hyperparameters": {name: getattr(args, name) for name in (
                     "seed", "steps", "batch_size", "lr", "sparsity", "prune_rate", "sampling_temperature")},
-                "metrics_kind": "mock_diagnostic" if settings.backend == "mock" else "model_training",
+                "metrics_kind": metrics_kind,
                 "prompt_source": PROMPTS["source"], "history": history, "pruning": None,
                 "versions": {name: version(name) for name in ("torch", "langgraph", "langchain-core", "langchain-deepseek")}}
     for step in range(args.steps):
         batch = [examples[(step * args.batch_size + offset) % len(examples)] for offset in range(args.batch_size)]
         report = train_step(policy, optimizer, batch, adapters, generator, sparsity=args.sparsity,
-                            temperature=args.sampling_temperature, allow_real_api=args.deepseek,
+                            temperature=args.sampling_temperature, allow_real_api=args.deepseek or args.allow_real_api,
                             roles=[agent.role for agent in team[:-1]])
         history.append({"step": step + 1, **report})
         real_calls = sum(episode["result"]["real_api_calls"] for item in history for episode in item["episodes"])

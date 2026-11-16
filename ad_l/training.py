@@ -49,7 +49,7 @@ def score_example(answer: str, example: Example):
 
 
 def train_step(policy, optimizer, examples, adapters, generator, *, sparsity=0.01, temperature=1.0,
-               allow_real_api=False, roles=None):
+               allow_real_api=False, roles=None, should_stop=None):
     if not examples or not math.isfinite(sparsity) or sparsity < 0:
         raise ValueError("Provide a nonempty batch and a finite nonnegative sparsity coefficient")
     if any(example.split != "train" for example in examples):
@@ -64,7 +64,7 @@ def train_step(policy, optimizer, examples, adapters, generator, *, sparsity=0.0
     optimizer.zero_grad(set_to_none=True)
     for example in examples:
         sampled = policy.sample(generator, temperature=temperature)
-        graph = build_system(team, sampled.execution, adapters, allow_real_api=allow_real_api)
+        graph = build_system(team, sampled.execution, adapters, allow_real_api=allow_real_api, should_stop=should_stop)
         state = graph.invoke({"task": example.task, "answer_type": example.answer_type})
         score = score_example(state["answer"], example) if state["status"] == "success" else {"prediction": None, "correct": False}
         reward = float(score["correct"])
@@ -73,7 +73,7 @@ def train_step(policy, optimizer, examples, adapters, generator, *, sparsity=0.0
                          "execution": sampled.execution, "result": state})
         if state["status"] != "success":
             generator.set_state(rng_before)
-            return {"status": "failed", "episodes": episodes, "updated": False}
+            return {"status": state["status"], "episodes": episodes, "updated": False}
         losses.append(-sampled.log_prob * reward)
     policy_loss = torch.stack(losses).mean()
     regularization = policy.sparsity_loss()

@@ -3,6 +3,18 @@
 使用 LangChain 接入模型，LangGraph 执行通信流程，PyTorch 学习边权重。
 默认共 5 个智能体，依次为 Math Solver、Mathematical Analyst、Programming Expert、Inspector、FinalRefer。前 4 个参与讨论，最后一个汇总。默认两轮，每题共 9 次模型调用。
 
+日常实验可直接双击项目中的 `启动评测平台.command`。平台会启动本机服务并打开浏览器，默认地址为 `http://127.0.0.1:8765`，使用已有的 `ad-l` 环境。再次双击会打开已经运行的平台。
+
+- 实验工作台设置智能体数量、讨论轮数、拓扑、边权重与随机种子，并预览通信图。
+- 智能体与模型页面配置每个节点的角色、服务类型、模型名称、API 地址和密钥，也可导入现有 `configs/agents.json` 与本地 `.env`。
+- 训练与评测页面选择数据集与参数，点击按钮启动任务，查看进度、损失和逐题结果，并可取消任务。
+- 测试集评测可选择已训练检查点，应用其团队设置，与初始拓扑进行同题、同模式对照。
+- 运行记录保存实验状态、训练检查点和完整调用记录，支持浏览器下载结果 JSON 和检查点。
+
+平台默认使用本地模拟。使用真实模型时，在页面保存各节点配置与密钥，再勾选本次任务允许真实 API 调用。运行计划会展示调用上限。模拟或混合后端的结果标为诊断指标，全部为真实模型时计算评测正确率。
+
+平台设置、密钥和实验记录位于 `platform_state/`，该目录已加入 Git 忽略规则。密钥以本地明文文件保存，目录权限为 `0700`，设置文件权限为 `0600`。页面返回密钥是否已保存的状态，实验导出包含模型参数及调用记录。平台绑定本机回环地址，适用于本机单用户实验。取消任务会等待当前模型请求结束，并保留成功训练步骤的检查点。
+
 ```bash
 conda activate ad-l
 python -m pip install -r requirements.txt
@@ -58,6 +70,22 @@ python train.py --deepseek --steps 3 --batch-size 2 --limit 6 --plan
 ```
 
 `--plan` 仅显示规模，不创建模型客户端。默认单题最多 9 次真实请求，上述训练最多 54 次。超时默认 60 秒，自动重试为 0。真实 Token 用量来自提供方，模拟用量为 `null`。
+
+按智能体分别配置 API 时，编辑 `configs/agents.json`。默认映射为 `agent_1` 数学求解、`agent_2` 数学分析、`agent_3` 编程专家、`agent_4` 检查员、`final` 最终汇总者。每个节点分别创建模型客户端，可以使用不同的模型、服务地址和密钥。
+
+每个节点可填写 `backend`、`base_url`、`model_env`、`api_key_env`、`temperature`、`max_tokens` 和 `timeout`。`backend` 支持 `deepseek`、`openai` 和 `mock`，其中 `openai` 使用 OpenAI 兼容协议。`base_url` 填写服务提供方的 API 根地址。生成参数为 `null` 时采用提供方默认值。
+
+`model_env` 和 `api_key_env` 填环境变量名称，实际模型名称和密钥填写到本地 `.env`，各节点字段见 `.env.example`。例如 `AGENT_1_MODEL` 和 `AGENT_1_API_KEY` 对应第一个智能体。模型名称也可以在 JSON 中通过 `model` 直接填写，此时删除同节点的 `model_env`。多个节点可以引用同一个密钥变量名以复用账户。
+
+```bash
+python run.py --api-config configs/agents.json --plan
+python run.py --api-config configs/agents.json --allow-real-api
+python train.py --api-config configs/agents.json --allow-real-api --output checkpoints/per-agent.pt
+```
+
+配置文件须覆盖当前团队的全部节点，扩展智能体数量时同步添加对应的 `agent_5` 等条目，并保留 `final`。使用配置文件时，将模型生成参数填在文件内。`--plan` 可在尚未填写密钥时校验结构并显示按节点计算的调用预算。实际请求通过 `--allow-real-api` 启用，已有 `--deepseek` 方式继续可用。
+
+运行记录和训练检查点按节点保存模型参数、服务地址及配置文件指纹。密钥值留在环境变量中。混合模拟和真实模型的训练标记为 `mixed_backend_diagnostic`。
 
 核心代码位于 `ad_l/`，运行入口为 `run.py`，训练入口为 `train.py`。所有测试脚本独立放在 `tests/`，可以整目录删除。
 

@@ -7,6 +7,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from ad_l.models import ModelSettings, create_model
+from ad_l.model_config import create_agent_models
 from ad_l.roles import create_team
 from ad_l.topology import EdgePolicy, TEMPORAL_MODES, TOPOLOGIES, TopologyConfig, load_policy
 
@@ -24,6 +25,8 @@ def add_arguments(parser: argparse.ArgumentParser):
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--roles", nargs="+", help="One quoted role name per discussion agent")
     parser.add_argument("--deepseek", action="store_true", help="Authorize real DeepSeek API requests")
+    parser.add_argument("--api-config", type=Path, help="JSON model/API settings keyed by agent ID")
+    parser.add_argument("--allow-real-api", action="store_true", help="Authorize real APIs selected by --api-config")
     parser.add_argument("--model")
     parser.add_argument("--temperature", type=float, help="LLM temperature")
     parser.add_argument("--max-tokens", type=int)
@@ -52,7 +55,14 @@ def resolve_policy(args, checkpoint: Path | None = None):
     return policy, team
 
 
-def adapters_from_args(args, team):
+def adapters_from_args(args, team, agent_config=None):
+    if agent_config is not None:
+        if any(value is not None for value in (args.model, args.temperature, args.max_tokens)) or args.timeout != 60.0:
+            raise ValueError("Set model generation parameters in --api-config when using per-agent APIs")
+        return create_agent_models(agent_config, allow_real_api=args.allow_real_api or args.deepseek,
+                                   env_file=ROOT / ".env")
+    if args.allow_real_api and not args.deepseek:
+        raise ValueError("--allow-real-api requires --api-config or --deepseek")
     if args.deepseek:
         from dotenv import load_dotenv
 
@@ -64,7 +74,7 @@ def adapters_from_args(args, team):
             raise ValueError("LLM generation parameters require --deepseek")
         settings = ModelSettings()
     adapter = create_model(settings, allow_real_api=args.deepseek, mock_response=args.mock_response)
-    return {agent.node_id: adapter for agent in team}, settings
+    return {agent.node_id: adapter for agent in team}, {agent.node_id: adapter.settings for agent in team}
 
 
 def print_plan(policy, team, examples=1):

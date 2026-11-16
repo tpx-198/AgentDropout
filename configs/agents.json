@@ -1,0 +1,47 @@
+{
+  "agent_1": {
+    "backend": "deepseek",
+    "base_url": "https://api.deepseek.com",
+    "model_env": "AGENT_1_MODEL",
+    "api_key_env": "AGENT_1_API_KEY",
+    "temperature": null,
+    "max_tokens": null,
+    "timeout": 60.0
+  },
+  "agent_2": {
+    "backend": "deepseek",
+    "base_url": "https://api.deepseek.com",
+    "model_env": "AGENT_2_MODEL",
+    "api_key_env": "AGENT_2_API_KEY",
+    "temperature": null,
+    "max_tokens": null,
+    "timeout": 60.0
+  },
+  "agent_3": {
+    "backend": "deepseek",
+    "base_url": "https://api.deepseek.com",
+    "model_env": "AGENT_3_MODEL",
+    "api_key_env": "AGENT_3_API_KEY",
+    "temperature": null,
+    "max_tokens": null,
+    "timeout": 60.0
+  },
+  "agent_4": {
+    "backend": "deepseek",
+    "base_url": "https://api.deepseek.com",
+    "model_env": "AGENT_4_MODEL",
+    "api_key_env": "AGENT_4_API_KEY",
+    "temperature": null,
+    "max_tokens": null,
+    "timeout": 60.0
+  },
+  "final": {
+    "backend": "deepseek",
+    "base_url": "https://api.deepseek.com",
+    "model_env": "FINAL_MODEL",
+    "api_key_env": "FINAL_API_KEY",
+    "temperature": null,
+    "max_tokens": null,
+    "timeout": 60.0
+  }
+}

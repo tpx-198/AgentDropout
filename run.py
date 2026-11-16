@@ -10,6 +10,7 @@ import torch
 
 from ad_l.cli import add_arguments, adapters_from_args, print_plan, resolve_policy, write_json
 from ad_l.system import build_system
+from ad_l.model_config import load_agent_config, model_call_plan
 
 
 def main():
@@ -29,6 +30,7 @@ def main():
         if args.output is not None and args.output.exists():
             raise ValueError("output already exists; choose a new file")
         policy, team = resolve_policy(args, args.checkpoint)
+        agent_config = load_agent_config(args.api_config, team) if args.api_config else None
         pruning = policy.prune(args.prune_rate)
         generator = torch.Generator().manual_seed(args.seed)
         with torch.no_grad():
@@ -37,19 +39,21 @@ def main():
         plan = {**print_plan(policy, team), "planned_real_api_calls":
                 policy.config.workers * policy.config.rounds + 1 if args.deepseek else 0,
                 "execution": sampled.execution, "pruning": pruning}
+        if agent_config is not None:
+            plan.update(model_call_plan(agent_config, team, policy.config.rounds, 1))
         if args.plan:
             print(json.dumps(plan, ensure_ascii=False, indent=2))
             return
-        adapters, settings = adapters_from_args(args, team)
+        adapters, settings = adapters_from_args(args, team, agent_config)
     except (OSError, ValueError, KeyError) as error:
         parser.error(str(error))
     except Exception as error:
         parser.error(f"Initialization failed ({type(error).__name__})")
-    graph = build_system(team, sampled.execution, adapters, allow_real_api=args.deepseek)
+    graph = build_system(team, sampled.execution, adapters, allow_real_api=args.deepseek or args.allow_real_api)
     state = asyncio.run(graph.ainvoke({"task": args.task})) if args.use_async else graph.invoke({"task": args.task})
     if args.output is not None:
         write_json(args.output, {"schema_version": 1, **plan, **policy.report(), "task": args.task,
-                                "settings": asdict(settings), "result": state})
+                                "settings": {node: asdict(value) for node, value in settings.items()}, "result": state})
     print(state["answer"])
     print(f"Status {state['status']} | agents {len(team)} | calls {state['model_calls']} | real calls {state['real_api_calls']}")
     print(f"Token usage {state['usage']}")
