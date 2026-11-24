@@ -9,6 +9,7 @@ from langchain_core.runnables import RunnableLambda
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
+from ad_l.datasets import ANSWER_TYPES
 from ad_l.models import ModelAdapter
 from ad_l.roles import Agent, decision_messages, worker_messages
 from ad_l.topology import topological_order
@@ -17,6 +18,7 @@ from ad_l.topology import topological_order
 class TeamState(TypedDict, total=False):
     task: str
     answer_type: str
+    dataset: str
     current: dict
     previous: dict
     round_outputs: list
@@ -37,8 +39,18 @@ def validate_execution(execution: dict, workers: int):
             or any(type(node) is not int or not 0 <= node < workers for node in summary)):
         raise ValueError("Invalid final aggregation sources")
     orders = []
+    previous_active = set()
     for index, graph in enumerate(rounds):
-        orders.append(topological_order(workers, graph["spatial"]))
+        active = graph.get("active", list(range(workers)))
+        if (not isinstance(active, list) or not active
+                or any(type(node) is not int or not 0 <= node < workers for node in active)
+                or len(set(active)) != len(active)):
+            raise ValueError("Invalid active discussion agents")
+        active = set(active)
+        order = topological_order(workers, graph["spatial"])
+        if any(source not in active or target not in active for source, target in graph["spatial"]):
+            raise ValueError("Spatial edge connects to a pruned node")
+        orders.append([node for node in order if node in active])
         temporal = graph["temporal"]
         if not isinstance(temporal, list) or (index == 0 and temporal):
             raise ValueError("The first round cannot have previous-round edges")
@@ -48,7 +60,12 @@ def validate_execution(execution: dict, workers: int):
                     or any(type(node) is not int or not 0 <= node < workers for node in edge)
                     or tuple(edge) in seen):
                 raise ValueError("Invalid or duplicate previous-round edge")
+            if edge[0] not in previous_active or edge[1] not in active:
+                raise ValueError("Previous-round edge connects to a pruned node")
             seen.add(tuple(edge))
+        previous_active = active
+    if not set(summary) <= previous_active:
+        raise ValueError("Final aggregation uses a pruned node")
     return orders
 
 
@@ -57,21 +74,22 @@ def build_system(team: tuple[Agent, ...], execution: dict, adapters: dict[str, M
     if (len(team) < 2 or team[-1].role != "FinalRefer"
             or len({agent.node_id for agent in team}) != len(team)):
         raise ValueError("A team requires unique IDs and a final decision-maker")
-    if set(adapters) != {agent.node_id for agent in team} or any(
-            not isinstance(adapter, ModelAdapter) for adapter in adapters.values()):
-        raise ValueError("Provide a ModelAdapter for every team member")
-    if not allow_real_api and any(adapter.settings.backend != "mock" for adapter in adapters.values()):
-        raise ValueError("Real model execution requires allow_real_api=True")
     workers = team[:-1]
     execution = copy.deepcopy(execution)
-    adapters = dict(adapters)
     orders = validate_execution(execution, len(workers))
+    required = {team[-1].node_id} | {workers[index].node_id for order in orders for index in order}
+    if (not required <= set(adapters) <= {agent.node_id for agent in team}
+            or any(not isinstance(adapter, ModelAdapter) for adapter in adapters.values())):
+        raise ValueError("Provide a ModelAdapter for every active team member")
+    adapters = {node: adapters[node] for node in required}
+    if not allow_real_api and any(adapter.settings.backend != "mock" for adapter in adapters.values()):
+        raise ValueError("Real model execution requires allow_real_api=True")
 
     def initialize(state):
         if not isinstance(state.get("task"), str) or not state["task"].strip():
             raise ValueError("task must be a nonempty string")
-        if state.get("answer_type", "numeric") not in {"numeric", "choice"}:
-            raise ValueError("answer_type must be numeric or choice")
+        if state.get("answer_type", "numeric") not in ANSWER_TYPES:
+            raise ValueError("Unsupported answer_type")
         return {"current": {}, "previous": {}, "round_outputs": [], "trace": [],
                 "answer": "", "status": "running", "model_calls": 0, "real_api_calls": 0, "usage": None}
 
@@ -86,15 +104,17 @@ def build_system(team: tuple[Agent, ...], execution: dict, adapters: dict[str, M
         adapter = adapters[agent.node_id]
 
         def prepare(state):
+            answer_type = state.get("answer_type", "numeric")
+            dataset = state.get("dataset")
             if final:
                 spatial = visible(state["previous"], execution["summary"])
                 temporal = {}
-                messages = decision_messages(state["task"], spatial, state.get("answer_type", "numeric"))
+                messages = decision_messages(state["task"], spatial, answer_type, dataset=dataset)
             else:
                 graph = execution["rounds"][round_index]
                 spatial = visible(state["current"], [source for source, target in graph["spatial"] if target == worker_index])
                 temporal = visible(state["previous"], [source for source, target in graph["temporal"] if target == worker_index])
-                messages = worker_messages(state["task"], agent.role, spatial, temporal, state.get("answer_type", "numeric"))
+                messages = worker_messages(state["task"], agent.role, spatial, temporal, answer_type, dataset=dataset)
             return messages, spatial, temporal
 
         def complete(state, messages, spatial, temporal, started, response=None, error=None):

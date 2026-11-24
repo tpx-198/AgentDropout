@@ -1,19 +1,23 @@
-"""Download and normalize the reasoning benchmarks used by AgentDropout."""
+"""Download and normalize the benchmarks supported by AD-L."""
 
 import argparse
 from collections import defaultdict
+from contextlib import ExitStack
 from datetime import datetime, timezone
 import hashlib
+from io import BytesIO
 import json
 import os
 from pathlib import Path
 import random
 import re
 import shutil
+import tarfile
 import tempfile
 from urllib.request import Request, urlopen
 
-from ad_l.datasets import numeric_target, question_fingerprint
+from ad_l.aptbench import ARCHIVE_URL, RAW_URL, REVISION, normalize_aptbench, sources as aptbench_sources
+from ad_l.datasets import APTBENCH_DATASETS, numeric_target, question_fingerprint, read_examples
 
 SOURCES = {
     "aqua": {
@@ -30,6 +34,8 @@ SOURCES = {
         "all": "https://raw.githubusercontent.com/AGI-Edgerunners/LLM-Adapters/main/dataset/MultiArith/MultiArith.json",
     },
 }
+DEFAULT_DATASETS = tuple(SOURCES)
+SOURCES.update({name: aptbench_sources(name) for name in APTBENCH_DATASETS})
 
 
 def grouped_split(rows: list[dict], seed: int):
@@ -51,6 +57,8 @@ def grouped_split(rows: list[dict], seed: int):
 
 
 def normalize(name: str, content: dict[str, bytes], seed: int):
+    if name in APTBENCH_DATASETS:
+        return normalize_aptbench(name, content)
     if name == "aqua":
         splits = {}
         for split in ("train", "validation", "test"):
@@ -94,7 +102,13 @@ def verify_directory(directory: Path):
     return manifest
 
 
-def prepare(name: str, output_dir: Path, seed: int):
+def download(url):
+    request = Request(url, headers={"User-Agent": "AD-L benchmark preparation"})
+    with urlopen(request, timeout=120) as response:
+        return response.read()
+
+
+def prepare(name: str, output_dir: Path, seed: int, *, aptbench_archive=None):
     destination = output_dir / name
     if destination.exists():
         manifest = verify_directory(destination)
@@ -106,9 +120,12 @@ def prepare(name: str, output_dir: Path, seed: int):
     try:
         content, sources = {}, []
         for split, url in SOURCES[name].items():
-            request = Request(url, headers={"User-Agent": "AD-L benchmark preparation"})
-            with urlopen(request, timeout=120) as response:
-                raw = response.read()
+            if aptbench_archive is not None and name in APTBENCH_DATASETS:
+                entry = f"APTBench-{REVISION}/{url.removeprefix(RAW_URL)}"
+                with aptbench_archive.extractfile(entry) as response:
+                    raw = response.read()
+            else:
+                raw = download(url)
             content[split] = raw
             sources.append({"source_split": split, "url": url, "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)})
         splits, policy = normalize(name, content, seed)
@@ -122,8 +139,6 @@ def prepare(name: str, output_dir: Path, seed: int):
         if "license" in content:
             (staging / "LICENSE").write_bytes(content["license"])
         (staging / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        from ad_l.datasets import read_examples
-
         for split in splits:
             read_examples(staging / f"{split}.jsonl", expected_split=split, dataset=name)
         os.rename(staging, destination)
@@ -159,14 +174,22 @@ def register_existing_gsm8k(output_dir: Path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--datasets", choices=tuple(SOURCES), nargs="+", default=list(SOURCES))
+    parser.add_argument("--datasets", choices=tuple(SOURCES), nargs="+", default=DEFAULT_DATASETS)
     parser.add_argument("--output-dir", type=Path, default=Path(__file__).resolve().parent / "data")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--aptbench-archive", type=Path, help="Use a local copy of the pinned APTBench .tar.gz")
     args = parser.parse_args()
     register_existing_gsm8k(args.output_dir)
-    for name in args.datasets:
-        manifest = prepare(name, args.output_dir, args.seed)
-        print(name, {split: info["records"] for split, info in manifest["splits"].items()}, flush=True)
+    with ExitStack() as stack:
+        archive = None
+        if any(name in APTBENCH_DATASETS and not (args.output_dir / name).exists() for name in args.datasets):
+            if args.aptbench_archive is not None:
+                archive = stack.enter_context(tarfile.open(args.aptbench_archive, "r:gz"))
+            else:
+                archive = stack.enter_context(tarfile.open(fileobj=BytesIO(download(ARCHIVE_URL)), mode="r:gz"))
+        for name in args.datasets:
+            manifest = prepare(name, args.output_dir, args.seed, aptbench_archive=archive)
+            print(name, {split: info["records"] for split, info in manifest["splits"].items()}, flush=True)
 
 
 if __name__ == "__main__":

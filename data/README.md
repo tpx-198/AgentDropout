@@ -23,3 +23,22 @@ AQuA 的训练数据会剔除与其官方 validation、test 完全相同的问�
 - MultiArith 使用 LLM-Adapters 研究项目维护的原始数据镜像。[MultiArith 文件](https://github.com/AGI-Edgerunners/LLM-Adapters/blob/main/dataset/MultiArith/MultiArith.json)
 
 在项目根目录运行 `python prepare_data.py` 可重新准备缺失的 AQuA、SVAMP 和 MultiArith 数据。已有文件会先校验，新的实验划分可通过 `--seed` 和独立的 `--output-dir` 创建。训练时使用 `--data-dir` 选择对应目录。
+
+## APTBench
+
+| 套件 | 子任务数 | 可评测题数 | 答案类型 |
+| --- | ---: | ---: | --- |
+| APTBench-SWE | 8 | 3,717 | 单选、命令与操作补全 |
+| APTBench-DR | 9 | 2,254 | 单选、多选、简答补全 |
+| APTBench-Tool | 4 | 2,898 | 工具名称与参数补全 |
+| APTBench-Agentic Math | 3 | 3,747 | 单选、判断 |
+
+数据来自腾讯优图的 APTBench 仓库，固定使用提交 `9aab1301ab2c743be6bf11d1a2f3c3c6bc123ffc`。导入时为每个套件生成 `test.jsonl`、`manifest.json` 和上游 `LICENSE`。SWE 的 `issue_fix/locate` 有 10 道题缺少标准选项，Tool 的 `acebench_api_param` 有 99 道题缺少参数名。导入清单记录了这些题目 ID 和排除原因。 [上游仓库](https://github.com/TencentYoutuResearch/APTBench/tree/9aab1301ab2c743be6bf11d1a2f3c3c6bc123ffc) · [论文](https://arxiv.org/abs/2510.24397)
+
+```bash
+python prepare_data.py --datasets aptbench_swe aptbench_dr aptbench_tool aptbench_math
+```
+
+准备命令下载固定版本的上游归档，也可通过 `--aptbench-archive` 使用已下载的同版本归档。本地生成的数据目录由 Git 忽略，新检出可用同一命令重建。平台只在测试集评测中提供这些套件，全量评测可一次选一个套件并填入对应总题数。
+
+AD-L 使用无示例的角色提示词和对话 API。单选按选项字母判分，多选比较选项集合，文本补全使用精确匹配。模型输入由任务、允许的上下文字段和选项组成，每道题的标准答案用于本地判分。工具参数补全按上游设置把指定工具和参数名作为已知条件。命令和代码按文本评测。结果是 AD-L 多智能体协议下的正确率，上游论文采用基础模型补全协议，并对部分任务报告 ROUGE。

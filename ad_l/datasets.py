@@ -7,7 +7,16 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-DATASETS = ("gsm8k", "aqua", "svamp", "multiarith")
+TRAIN_DATASETS = ("gsm8k", "aqua", "svamp", "multiarith")
+APTBENCH_DATASETS = ("aptbench_swe", "aptbench_dr", "aptbench_tool", "aptbench_math")
+DATASETS = (*TRAIN_DATASETS, *APTBENCH_DATASETS)
+ANSWER_TYPES = {"numeric", "choice", "multi_choice", "text"}
+
+
+def _render_choices(choices):
+    if not choices:
+        return ""
+    return "\n\nOptions\n" + "\n".join(f"{chr(65 + i)}) {option}" for i, option in enumerate(choices))
 
 
 @dataclass(frozen=True)
@@ -19,6 +28,10 @@ class Example:
     split: str = "train"
     answer_type: str = "numeric"
     choices: tuple[str, ...] = ()
+
+    @property
+    def question(self):
+        return self.task.removesuffix(_render_choices(self.choices))
 
 
 def numeric_target(value):
@@ -46,7 +59,7 @@ def read_examples(path: Path, *, expected_split="train", dataset=None):
     if expected_split == "train" and digest == "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14":
         raise ValueError("The official GSM8K test set cannot be used as training data")
     records, seen = [], set()
-    for line_number, line in enumerate(raw.decode("utf-8").splitlines(), 1):
+    for line_number, line in enumerate(raw.splitlines(), 1):
         if not line.strip():
             continue
         try:
@@ -68,29 +81,40 @@ def read_examples(path: Path, *, expected_split="train", dataset=None):
                 answer_type = row["answer_type"]
                 sample_id = row["id"]
                 options = row.get("choices", [])
-                if not isinstance(options, list) or any(not isinstance(option, str) or not option.strip() for option in options):
-                    raise ValueError("choices must be a list of nonempty strings")
+                if (not isinstance(options, list) or any(not isinstance(option, str) for option in options)
+                        or (name not in APTBENCH_DATASETS and any(not option.strip() for option in options))):
+                    raise ValueError("Invalid choices list")
                 choices = tuple(options)
                 if answer_type == "numeric":
                     target = numeric_target(row["target"])
                     if choices:
                         raise ValueError("Numeric questions cannot have choices")
-                elif answer_type == "choice":
+                elif answer_type in {"choice", "multi_choice"}:
                     target = row["target"]
-                    if (not 2 <= len(choices) <= 26 or not isinstance(target, str)
-                            or len(target) != 1 or target not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[:len(choices)]):
-                        raise ValueError("Choice target must be one of the available option letters")
+                    labels = target.split(",") if isinstance(target, str) else []
+                    available = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ"[:len(choices)])
+                    if (not 2 <= len(choices) <= 26 or not labels or
+                            len(set(labels)) != len(labels) or set(labels) - available or
+                            (answer_type == "choice" and len(labels) != 1) or
+                            any(not choices[ord(label) - ord("A")].strip() for label in labels)):
+                        raise ValueError("Choice target must contain valid option letters")
+                    target = ",".join(sorted(labels))
+                elif answer_type == "text":
+                    target = row["target"]
+                    if not isinstance(target, str) or not target.strip() or choices:
+                        raise ValueError("Text questions need a nonempty answer and cannot have choices")
+                    target = target.strip()
                 else:
-                    raise ValueError("answer_type must be numeric or choice")
+                    raise ValueError("Unsupported answer type")
+            if name in APTBENCH_DATASETS and split != "test":
+                raise ValueError("APTBench is evaluation-only")
             if (name not in DATASETS or (dataset is not None and name != dataset) or split != expected_split
                     or not isinstance(sample_id, str) or not sample_id or sample_id in seen):
                 raise ValueError("Dataset, split or sample ID mismatch")
         except (ValueError, KeyError, TypeError) as error:
             raise ValueError(f"{path.name} row {line_number}: {error}") from error
         seen.add(sample_id)
-        task = question.strip()
-        if choices:
-            task += "\n\nOptions\n" + "\n".join(f"{chr(65 + i)}) {option}" for i, option in enumerate(choices))
+        task = question.strip() + _render_choices(choices)
         records.append(Example(sample_id, task, target, name, split, answer_type, choices))
     if not records:
         raise ValueError("Dataset must be nonempty")
@@ -120,8 +144,8 @@ def load_examples(path: Path, limit: int, seed: int):
 
 
 def load_training_mix(data_dir: Path, datasets, limit: int, seed: int):
-    if not datasets or len(set(datasets)) != len(datasets) or any(name not in DATASETS for name in datasets):
-        raise ValueError("Select distinct supported datasets")
+    if not datasets or len(set(datasets)) != len(datasets) or any(name not in TRAIN_DATASETS for name in datasets):
+        raise ValueError("Select distinct supported training datasets")
     pools, metadata = [], {}
     for name in datasets:
         pool, info = load_examples(Path(data_dir) / name / "train.jsonl", limit, seed)

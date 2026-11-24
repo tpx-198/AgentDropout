@@ -251,6 +251,7 @@
 <button class="experiment-tab active" data-kind="train" role="tab">拓扑训练</button>
 <button class="experiment-tab" data-kind="evaluate" role="tab">测试集评测</button>
 </div>
+<p id="node-pruning-unavailable" class="helper" hidden>当前后端需要重启才能使用节点剪枝。</p>
 <div class="experiment-grid">
 <article class="card">
 <div class="card-header">
@@ -275,10 +276,11 @@
 </label>
 <label>稀疏正则系数<input id="sparsity" type="number" min="0" step="0.01" value="0.01">
 </label>
-<label>剪枝比例<input id="prune-rate" type="number" min="0" max="1" step="0.05" value="0.25">
+<label>边剪枝比例<input id="prune-rate" type="number" min="0" max="1" step="0.05" value="0.25">
 </label>
 </div>
-<p class="helper">各数据集按轮流取题组成训练池。训练完成后保存剪枝后的拓扑检查点。</p>
+<label>每轮剪除节点数<input id="train-node-prune" type="number" min="0" max="3" step="1" value="0"></label>
+<p class="helper">训练结束后先按边权重剪节点，再剪剩余边。每轮至少保留一个讨论节点。</p>
 </div>
 <div id="evaluation-fields" hidden>
 <label>评测数据集</label>
@@ -292,7 +294,7 @@
 <button class="button small" id="apply-checkpoint">应用检查点设置</button>
 </div>
 <div class="three-columns">
-<label>每类测试题数<input id="eval-limit" type="number" min="1" max="1000" value="5">
+<label>每类测试题数<input id="eval-limit" type="number" min="1" max="10000" value="5">
 </label>
 <label>推理方式<select id="eval-mode">
 <option value="sampled">按权重采样</option>
@@ -303,6 +305,7 @@
 <label>边权重阈值<input id="eval-threshold" type="number" min="0" max="1" step="0.05" value="0.5">
 </label>
 </div>
+<label>每轮额外剪除节点数<input id="eval-node-prune" type="number" min="0" max="3" step="1" value="0"></label>
 <label class="checkbox-label">
 <input id="compare" type="checkbox" checked> 使用已训练检查点时，与初始拓扑进行同题对照</label>
 <p class="helper">评测冻结拓扑参数，并使用独立测试划分。相同模式、样本和种子用于对照。</p>

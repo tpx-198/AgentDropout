@@ -1,11 +1,32 @@
 """Frozen-topology evaluation, shared by the local experiment platform."""
 
 from time import perf_counter
+from unicodedata import normalize
 
 import torch
 
+from ad_l.roles import PROMPTS
 from ad_l.system import build_system
 from ad_l.training import score_example
+
+
+def _normalize_text(text):
+    return " ".join(normalize("NFKC", text).casefold().split())
+
+
+def validate_test_prompt_overlap(examples):
+    roles = [*PROMPTS["roles"].items(), ("FinalRefer", PROMPTS["decision"])]
+    prompts = [(role, field, _normalize_text(prompt[field])) for role, prompt in roles
+               for field in ("few_shot", "system")]
+    overlaps = []
+    for example in examples:
+        # Compare the question stem even if a multiple-choice example omits its options.
+        question = _normalize_text(example.question)
+        if question:
+            overlaps.extend(f"{role} ({field}): {example.sample_id}"
+                            for role, field, prompt in prompts if question in prompt)
+    if overlaps:
+        raise ValueError("提示词包含测试题：" + "; ".join(overlaps))
 
 
 def summarize_rows(rows, *, diagnostic=False):
@@ -25,11 +46,16 @@ def summarize_rows(rows, *, diagnostic=False):
             "usage_complete": usage_complete}
 
 
+def uses_mock_models(policy, team, adapters):
+    return any(count and adapters[node].settings.backend == "mock"
+               for node, count in policy.calls_by_agent(team).items())
+
+
 def evaluate_examples(policy, examples, team, adapters, *, seed=0, mode="sampled", threshold=0.5,
                       temperature=1.0, allow_real_api=False, should_stop=None, progress=None, group="current"):
     policy.eval()
     generator = torch.Generator().manual_seed(seed)
-    diagnostic = any(adapter.settings.backend == "mock" for adapter in adapters.values())
+    diagnostic = uses_mock_models(policy, team, adapters)
     rows = []
     status = "completed"
     for example in examples:
@@ -40,7 +66,7 @@ def evaluate_examples(policy, examples, team, adapters, *, seed=0, mode="sampled
         with torch.no_grad():
             sampled = policy.sample(generator, mode=mode, threshold=threshold, temperature=temperature)
         graph = build_system(team, sampled.execution, adapters, allow_real_api=allow_real_api, should_stop=should_stop)
-        state = graph.invoke({"task": example.task, "answer_type": example.answer_type})
+        state = graph.invoke({"task": example.task, "answer_type": example.answer_type, "dataset": example.dataset})
         if state["status"] == "cancelled" and not state["trace"]:
             status = "cancelled"
             break

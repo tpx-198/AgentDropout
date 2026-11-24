@@ -17,8 +17,8 @@ import torch
 from dotenv import dotenv_values
 from langsmith import tracing_context
 
-from ad_l.datasets import DATASETS, load_training_mix, read_examples
-from ad_l.evaluation import evaluate_examples, summarize_rows
+from ad_l.datasets import DATASETS, TRAIN_DATASETS, load_training_mix, read_examples
+from ad_l.evaluation import evaluate_examples, summarize_rows, uses_mock_models, validate_test_prompt_overlap
 from ad_l.model_config import load_agent_config
 from ad_l.models import ModelSettings, create_model
 from ad_l.roles import PROMPTS, create_team
@@ -47,10 +47,10 @@ def default_config():
                         "temperature": None, "max_tokens": None, "timeout": 60.0,
                         "mock_response": "[MOCK fixed response]\nThe answer is 5"} for agent in team},
             "sampling_temperature": 1.0,
-            "training": {"datasets": list(DATASETS), "limit": 6, "steps": 3, "batch_size": 2,
-                         "lr": 0.05, "sparsity": 0.01, "prune_rate": 0.25},
-            "evaluation": {"datasets": list(DATASETS), "limit": 5, "mode": "sampled", "threshold": 0.5,
-                           "checkpoint": "", "compare": True}}
+            "training": {"datasets": list(TRAIN_DATASETS), "limit": 6, "steps": 3, "batch_size": 2,
+                         "lr": 0.05, "sparsity": 0.01, "prune_rate": 0.25, "node_prune_count": 0},
+            "evaluation": {"datasets": list(TRAIN_DATASETS), "limit": 5, "mode": "sampled", "threshold": 0.5,
+                           "checkpoint": "", "compare": True, "node_prune_count": 0}}
 
 
 def _integer(value, low, high, label):
@@ -84,9 +84,11 @@ def validate_config(config):
     for name in ("training", "evaluation"):
         section = config[name]
         datasets = section["datasets"]
-        if not isinstance(datasets, list) or not datasets or len(set(datasets)) != len(datasets) or set(datasets) - set(DATASETS):
+        supported = TRAIN_DATASETS if name == "training" else DATASETS
+        if not isinstance(datasets, list) or not datasets or len(set(datasets)) != len(datasets) or set(datasets) - set(supported):
             raise ValueError("至少选择一个有效数据集")
-        _integer(section["limit"], 1, 1000, "每类抽样题数")
+        _integer(section["limit"], 1, 1000 if name == "training" else 10000, "每类抽样题数")
+        _integer(section.setdefault("node_prune_count", 0), 0, topology.workers - 1, "每轮剪除节点数")
     train = config["training"]
     _integer(train["steps"], 1, 1000, "训练步数")
     _integer(train["batch_size"], 1, 64, "批大小")
@@ -113,7 +115,7 @@ class SettingsStore:
         os.chmod(path.parent, 0o700)
         if path.exists():
             self.state = json.loads(path.read_text(encoding="utf-8"))
-            validate_config(self.state["config"])
+            self.state["config"] = validate_config(self.state["config"])
         else:
             self.state = {"config": default_config(), "keys": {}}
 
@@ -230,8 +232,17 @@ class PlatformService:
             policy, metadata = load_policy(self._checkpoint(identity))
             if policy.config != topology or metadata.get("roles") != config["roles"]:
                 raise ValueError("当前智能体、轮数、拓扑或角色与检查点不一致，请先应用检查点设置")
-            return policy
-        return EdgePolicy(topology)
+        else:
+            policy = EdgePolicy(topology)
+        if kind == "evaluate":
+            policy.prune_nodes(config["evaluation"]["node_prune_count"])
+        return policy
+
+    def _evaluation_policies(self, config, policy):
+        options = config["evaluation"]
+        if options["checkpoint"] and options["compare"]:
+            return {"baseline": EdgePolicy(policy.config), "trained": policy}
+        return {"current": policy}
 
     def checkpoint_settings(self, identity):
         policy, metadata = load_policy(self._checkpoint(identity))
@@ -241,9 +252,10 @@ class PlatformService:
     def preview(self, config):
         config = validate_config(config)
         policy = self._policy(config, "evaluate")
+        team = create_team(policy.config.agents, config["roles"])
         with torch.no_grad():
             sampled = policy.sample(torch.Generator().manual_seed(policy.config.seed), mode="fixed")
-        return {**policy.report(), "execution": sampled.execution}
+        return {**policy.report(), "execution": sampled.execution, "calls_by_agent": policy.calls_by_agent(team)}
 
     def _examples(self, config, kind):
         section = config["training" if kind == "train" else "evaluation"]
@@ -251,7 +263,11 @@ class PlatformService:
             return load_training_mix(self.root / "data", section["datasets"], section["limit"], config["topology"]["seed"])
         pools, metadata = [], {}
         for name in section["datasets"]:
-            records, info = read_examples(self.root / "data" / name / "test.jsonl", expected_split="test", dataset=name)
+            path = self.root / "data" / name / "test.jsonl"
+            if not path.is_file():
+                raise ValueError(f"{name} 测试集尚未准备")
+            records, info = read_examples(path, expected_split="test", dataset=name)
+            validate_test_prompt_overlap(records)
             if section["limit"] > len(records):
                 raise ValueError(f"{name} 测试集只有 {len(records)} 题，请调小抽样题数")
             indices = sorted(random.Random(config["topology"]["seed"]).sample(range(len(records)), section["limit"]))
@@ -264,16 +280,17 @@ class PlatformService:
         config = validate_config(config)
         if kind not in {"train", "evaluate"}:
             raise ValueError("任务类型无效")
-        self._policy(config, kind)
+        policy = self._policy(config, kind)
         examples, dataset = self._examples(config, kind)
-        groups = 2 if kind == "evaluate" and config["evaluation"]["checkpoint"] and config["evaluation"]["compare"] else 1
-        count = config["training"]["steps"] * config["training"]["batch_size"] if kind == "train" else len(examples) * groups
-        rounds = config["topology"]["rounds"]
-        team = create_team(config["topology"]["agents"], config["roles"])
-        calls = {agent.node_id: count * (1 if agent.node_id == "final" else rounds) for agent in team}
+        policies = {"training": policy} if kind == "train" else self._evaluation_policies(config, policy)
+        count = config["training"]["steps"] * config["training"]["batch_size"] if kind == "train" else len(examples)
+        team = create_team(policy.config.agents, config["roles"])
+        by_group = {name: group.calls_by_agent(team, count) for name, group in policies.items()}
+        calls = {agent.node_id: sum(group[agent.node_id] for group in by_group.values()) for agent in team}
         real_calls = sum(value for node, value in calls.items() if config["models"][node]["backend"] != "mock")
-        return {"kind": kind, "selected": len(examples), "groups": groups, "dataset": dataset,
+        return {"kind": kind, "selected": len(examples), "groups": len(policies), "dataset": dataset,
                 "model_calls": sum(calls.values()), "real_api_calls": real_calls, "calls_by_agent": calls,
+                "calls_by_group": {name: sum(group.values()) for name, group in by_group.items()},
                 "sample_ids": [example.sample_id for example in examples]}
 
     def submit(self, kind, config, *, allow_real_api=False):
@@ -285,7 +302,7 @@ class PlatformService:
             state = self.store.snapshot()
             keys = state["keys"]
             for node, spec in config["models"].items():
-                if spec["backend"] != "mock":
+                if plan["calls_by_agent"][node] and spec["backend"] != "mock":
                     if not allow_real_api:
                         raise ValueError("请勾选本次任务允许真实 API 调用")
                     if not spec["model"].strip() or not keys.get(node):
@@ -326,9 +343,11 @@ class PlatformService:
                 self._persist(self.jobs[identity])
             return self.public_job(identity)
 
-    def _adapters(self, config, keys, allow_real_api):
+    def _adapters(self, config, keys, allow_real_api, calls_by_agent):
         adapters = {}
         for node, spec in config["models"].items():
+            if not calls_by_agent[node]:
+                continue
             settings = ModelSettings(**{name: spec.get(name) for name in
                 ("backend", "model", "base_url", "temperature", "max_tokens", "timeout")})
             adapters[node] = create_model(settings, api_key=keys.get(node), allow_real_api=allow_real_api,
@@ -345,7 +364,7 @@ class PlatformService:
             policy = self._policy(config, job["kind"])
             examples, dataset = self._examples(config, job["kind"])
             team = create_team(policy.config.agents, config["roles"])
-            adapters = self._adapters(config, keys, allow_real_api)
+            adapters = self._adapters(config, keys, allow_real_api, job["plan"]["calls_by_agent"])
             keys.clear()
             diagnostic = any(adapter.settings.backend == "mock" for adapter in adapters.values())
             with self.lock:
@@ -355,7 +374,7 @@ class PlatformService:
                 if job["kind"] == "train":
                     self._train(job, directory, policy, examples, team, adapters, dataset, diagnostic, allow_real_api)
                 else:
-                    self._evaluate(job, directory, policy, examples, team, adapters, dataset, diagnostic, allow_real_api)
+                    self._evaluate(job, directory, policy, examples, team, adapters, dataset, allow_real_api)
         except Exception as error:
             with self.lock:
                 job.update(status="failed", message=f"任务执行失败（{type(error).__name__}），请检查模型配置和运行记录")
@@ -403,21 +422,23 @@ class PlatformService:
                 break
         if self.cancel_event.is_set():
             status = "cancelled"
-        pruning = policy.prune(parameters["prune_rate"]) if status == "completed" else None
+        node_pruning, pruning = [], None
+        if status == "completed":
+            node_pruning = policy.prune_nodes(parameters["node_prune_count"])
+            pruning = policy.prune(parameters["prune_rate"])
         if job["completed_steps"]:
-            metadata.update(status=status, pruning=pruning)
+            metadata.update(status=status, pruning=pruning, node_pruning=node_pruning)
             save_policy(directory / "checkpoint.pt", policy, metadata)
         atomic_json(directory / "details.json", {"kind": "train", "reports": reports, "rows": rows, "dataset": dataset})
         with self.lock:
             job.update(status=status, message={"completed": "训练完成，剪枝与检查点已保存", "cancelled": "训练已取消，已保留成功步骤的检查点"}.get(status, "模型调用失败，已保留运行记录"),
-                       topology=policy.report(), pruning=pruning)
+                       topology=policy.report(), pruning=pruning, node_pruning=node_pruning)
 
-    def _evaluate(self, job, directory, policy, examples, team, adapters, dataset, diagnostic, allow_real_api):
+    def _evaluate(self, job, directory, policy, examples, team, adapters, dataset, allow_real_api):
         config = job["config"]
         options = config["evaluation"]
-        policies = [("current", policy)]
-        if options["checkpoint"] and options["compare"]:
-            policies = [("baseline", EdgePolicy(policy.config)), ("trained", policy)]
+        policies = self._evaluation_policies(config, policy)
+        diagnostics = {name: uses_mock_models(candidate, team, adapters) for name, candidate in policies.items()}
         rows = []
 
         def progress(row):
@@ -425,12 +446,12 @@ class PlatformService:
             with self.lock:
                 job.update(progress=len(rows), rows=[self._compact(value) for value in rows],
                            summary={name: summarize_rows([value for value in rows if value["group"] == name], diagnostic=diagnostic)
-                                    for name, _ in policies}, message=f"已完成 {len(rows)} / {job['total']} 次答题")
+                                    for name, diagnostic in diagnostics.items()}, message=f"已完成 {len(rows)} / {job['total']} 次答题")
                 self._persist(job)
             atomic_json(directory / "details.json", {"kind": "evaluate", "rows": rows, "dataset": dataset})
 
         status = "completed"
-        for group, active in policies:
+        for group, active in policies.items():
             report = evaluate_examples(active, examples, team, adapters, seed=policy.config.seed,
                 mode=options["mode"], threshold=options["threshold"], temperature=config["sampling_temperature"],
                 allow_real_api=allow_real_api, should_stop=self.cancel_event.is_set, progress=progress, group=group)

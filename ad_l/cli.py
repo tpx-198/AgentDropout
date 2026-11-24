@@ -32,6 +32,8 @@ def add_arguments(parser: argparse.ArgumentParser):
     parser.add_argument("--max-tokens", type=int)
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--sampling-temperature", type=float, default=1.0)
+    parser.add_argument("--node-prune-count", type=int, default=0,
+                        help="Number of discussion agents to prune per round")
     parser.add_argument("--mock-response", default="[MOCK fixed response]\nThe answer is 5")
     parser.add_argument("--plan", action="store_true", help="Print call budget without creating model clients")
 
@@ -55,12 +57,12 @@ def resolve_policy(args, checkpoint: Path | None = None):
     return policy, team
 
 
-def adapters_from_args(args, team, agent_config=None):
+def adapters_from_args(args, team, agent_config=None, *, active_nodes=None):
     if agent_config is not None:
         if any(value is not None for value in (args.model, args.temperature, args.max_tokens)) or args.timeout != 60.0:
             raise ValueError("Set model generation parameters in --api-config when using per-agent APIs")
         return create_agent_models(agent_config, allow_real_api=args.allow_real_api or args.deepseek,
-                                   env_file=ROOT / ".env")
+                                   env_file=ROOT / ".env", active_nodes=active_nodes)
     if args.allow_real_api and not args.deepseek:
         raise ValueError("--allow-real-api requires --api-config or --deepseek")
     if args.deepseek:
@@ -78,9 +80,9 @@ def adapters_from_args(args, team, agent_config=None):
 
 
 def print_plan(policy, team, examples=1):
-    calls = examples * (policy.config.workers * policy.config.rounds + 1)
+    calls = policy.calls_by_agent(team, examples)
     return {"agents": [asdict(agent) for agent in team], "topology": asdict(policy.config),
-            "planned_model_calls": calls}
+            "planned_model_calls": sum(calls.values()), "planned_model_calls_by_agent": calls}
 
 
 def write_json(path: Path, value: dict):

@@ -10,7 +10,9 @@ from unittest.mock import patch
 
 import torch
 
-from ad_l.datasets import DATASETS, Example, load_examples, load_training_mix, question_fingerprint, read_examples
+from ad_l.aptbench import TASKS
+from ad_l.datasets import APTBENCH_DATASETS, DATASETS, TRAIN_DATASETS, Example, load_examples, load_training_mix, question_fingerprint, read_examples
+from ad_l.evaluation import validate_test_prompt_overlap
 from ad_l.models import create_model
 from ad_l.roles import create_team
 from ad_l.topology import EdgePolicy, TopologyConfig
@@ -21,8 +23,17 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DatasetTests(unittest.TestCase):
-    def test_all_prepared_sources_have_disjoint_train_and_test_questions(self):
+    def test_all_role_prompts_are_disjoint_from_test_questions(self):
         for name in DATASETS:
+            directory = ROOT / 'data' / name
+            if name in APTBENCH_DATASETS and not directory.exists():
+                continue
+            with self.subTest(dataset=name):
+                examples, _ = read_examples(directory / 'test.jsonl', expected_split='test', dataset=name)
+                validate_test_prompt_overlap(examples)
+
+    def test_all_prepared_sources_have_disjoint_train_and_test_questions(self):
+        for name in TRAIN_DATASETS:
             with self.subTest(dataset=name):
                 train, _ = read_examples(ROOT / 'data' / name / 'train.jsonl')
                 test, _ = read_examples(ROOT / 'data' / name / 'test.jsonl', expected_split='test')
@@ -35,10 +46,10 @@ class DatasetTests(unittest.TestCase):
                     self.assertEqual(manifest['splits']['train']['records'], len(train))
 
     def test_balanced_pool_is_deterministic_and_includes_every_source(self):
-        first, metadata = load_training_mix(ROOT / 'data', DATASETS, 2, 7)
-        second, _ = load_training_mix(ROOT / 'data', DATASETS, 2, 7)
+        first, metadata = load_training_mix(ROOT / 'data', TRAIN_DATASETS, 2, 7)
+        second, _ = load_training_mix(ROOT / 'data', TRAIN_DATASETS, 2, 7)
         self.assertEqual(first, second)
-        self.assertEqual([example.dataset for example in first], list(DATASETS) * 2)
+        self.assertEqual([example.dataset for example in first], list(TRAIN_DATASETS) * 2)
         self.assertEqual(metadata['selected'], 8)
         self.assertEqual(metadata['sampling']['strategy'], 'round_robin')
         self.assertTrue(all(example.split == 'train' for example in first))
@@ -105,6 +116,43 @@ class DatasetTests(unittest.TestCase):
             self.assertNotIn('"target"', str(call['messages']))
         with self.assertRaisesRegex(ValueError, 'training examples'):
             train_step(policy, optimizer, [replace(example, split='test')], adapters, torch.Generator())
+
+    def test_aptbench_import_keeps_answers_separate_and_supports_all_formats(self):
+        for dataset, tasks in TASKS.items():
+            content = {}
+            for name, task in tasks.items():
+                row = {field: f'Public {field}' for _, field in task.fields}
+                row.update(query_answer='PRIVATE_QUERY_ANSWER', next_step='PRIVATE_NEXT_STEP')
+                row[task.target_field] = {'choice': 'B', 'multi_choice': ['C', 'B'], 'text': 'Exact Value'}[task.answer_type]
+                row['choices'] = ('(A) One (B) Two (C) Three' if name.startswith(('env_setup/', 'agentic_math/'))
+                                  else '(A) One\n(B) Two\n(C) Three\n(D) ')
+                content[name] = json.dumps(row).encode()
+                if name == 'issue_fix/locate':
+                    invalid = {**row, 'answer': 'D'}
+                    content[name] += b'\n' + json.dumps(invalid).encode()
+                if name == 'tool/acebench_api_param':
+                    invalid = {**row, 'param_name': ''}
+                    content[name] += b'\n' + json.dumps(invalid).encode()
+            with self.subTest(dataset=dataset), tempfile.TemporaryDirectory() as directory:
+                splits, metadata = normalize(dataset, content, 0)
+                self.assertEqual(set(splits), {'test'})
+                self.assertEqual(metadata['tasks'], dict.fromkeys(tasks, 1))
+                excluded = {
+                    'aptbench_swe': {'id': 'aptbench_swe:issue_fix/locate:2', 'reason': 'gold_option_missing'},
+                    'aptbench_tool': {'id': 'aptbench_tool:tool/acebench_api_param:2', 'reason': 'parameter_name_missing'},
+                }
+                self.assertEqual(metadata['excluded'], [excluded[dataset]] if dataset in excluded else [])
+                path = Path(directory) / 'test.jsonl'
+                path.write_text(''.join(json.dumps(row) + '\n' for row in splits['test']))
+                examples, _ = read_examples(path, expected_split='test', dataset=dataset)
+                for example in examples:
+                    self.assertNotIn('PRIVATE_', example.task)
+                    self.assertNotIn('Exact Value', example.task)
+                    answer = {'choice': 'B', 'multi_choice': '**C, B**', 'text': '`Exact Value`'}[example.answer_type]
+                    self.assertTrue(score_example(f'Reasoning.\nThe answer is {answer}', example)['correct'])
+                    self.assertFalse(score_example('The answer is A', example)['correct'])
+                with self.assertRaisesRegex(ValueError, 'training datasets'):
+                    load_training_mix(Path(directory), [dataset], 1, 0)
 
     def test_manifest_detects_edited_data(self):
         with tempfile.TemporaryDirectory() as directory:

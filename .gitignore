@@ -3,3 +3,4 @@ __pycache__/
 *.py[cod]
 checkpoints/
 platform_state/
+/data/aptbench_*/

@@ -33,6 +33,22 @@ python run.py --topology layered --layers 2 --async
 
 全连接、随机、分层拓扑和边采样参考论文第 3.3 节与附录 A.4。链式、星形和辩论式用于扩展实验。[AgentDropout 论文](https://aclanthology.org/2025.acl-long.1170.pdf)
 
+### 节点剪枝
+
+在 **训练与评测 → 拓扑训练** 设置「每轮剪除节点数」。训练先更新完整团队的边权，结束后按各轮节点相连的有效边平均权重从低到高剪节点，再按配置剪剩余边。分数相同按节点编号排序。每轮至少保留一个讨论节点，最终汇总者始终执行。检查点记录每轮保留的节点，并可直接用于评测。
+
+**测试集评测**中的「每轮额外剪除节点数」对当前初始拓扑或已选检查点生效。设置为 0 可直接使用检查点已有的节点掩码。拓扑图按轮次标出被剪节点，运行预算按各节点实际参与的轮数计算。默认四个讨论节点、两轮，每轮剪一个后单题调用从 9 次降到 7 次。
+
+```bash
+python run.py --node-prune-count 1 --plan
+python train.py --datasets gsm8k --node-prune-count 1 --prune-rate 0 --output checkpoints/node-only.pt
+python run.py --checkpoint checkpoints/node-only.pt
+```
+
+设置节点剪枝数或边剪枝比例为 0，即可做不剪枝、只剪边、只剪节点和节点加边剪枝的对照。旧检查点载入时默认每个讨论节点在每轮均可执行。
+
+### 训练与数据
+
 训练入口默认混合本地 GSM8K、AQuA、SVAMP 和 MultiArith 的 train 数据，以最终答案是否正确作为奖励，执行 REINFORCE，再按各轮矩阵内最低权重剪除指定比例的候选边。数值题比较数值答案，AQuA 比较选项字母，提示词随题型调整。
 
 ```bash
@@ -55,11 +71,17 @@ python train.py --datasets gsm8k aqua svamp multiarith --plan
 
 `prepare_data.py` 下载缺失的数据并保存来源 URL、原文件与输出文件的 SHA-256。已经准备好的数据只进行本地校验。
 
+可额外导入 **APTBench**。准备完成后，打开 **训练与评测 → 测试集评测**，勾选所需套件并设置题数。APTBench 的四个套件只用于评测。 [APTBench 数据说明](data/README.md#aptbench)
+
+```bash
+python prepare_data.py --datasets aptbench_swe aptbench_dr aptbench_tool aptbench_math
+```
+
 剪枝数量为每张矩阵有效边数乘 `--prune-rate` 后向下取整，剪除边的权重为 0，后续训练不会重新启用。检查点保存参数、配置、数据指纹、抽样清单、提示词来源、逐步运行记录和模型用量。每步更新后保存，模型调用失败时保留之前成功更新的权重。`--output` 指定新路径以开展独立实验。
 
 默认使用固定模拟回答，模拟运行只验证流程，无法衡量模型准确率或剪枝收益。`--sparsity` 控制概率矩阵核范数与汇总权重均值的惩罚项。可用 `--sparsity 0` 单独研究策略梯度。
 
-本实现保留原项目的角色与示例提示词，通信消息统一传入可见回答原文。Programming Expert 生成的代码作为文本参与讨论。汇总输入边也参与学习，属于本项目的扩展。训练目标采用概率矩阵正则化，这些实现选择与论文完整的两阶段节点及边剪枝实验有区别。剪边作用于消息输入，默认五节点两轮运行仍有 9 次模型调用。
+本实现保留原项目的角色，最终汇总者使用本项目自编的示例。平台在测试集评测前检查所有角色的系统提示词与示例，发现题干与所选数据集的完整测试集重合时阻止启动。通信消息统一传入可见回答原文。Programming Expert 生成的代码作为文本参与讨论。汇总输入边也参与学习，训练目标采用概率矩阵正则化。节点和边都在同一次训练后剪枝，论文另设剪节点后重新训练边权的阶段。
 
 真实解题和任务驱动训练需要大模型 API。将 `.env.example` 复制为 `.env`，填写 `DEEPSEEK_API_KEY` 和账户可用的 `DEEPSEEK_MODEL`，再显式启用真实请求。已有环境变量优先于 `.env`。
 

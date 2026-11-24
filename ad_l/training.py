@@ -29,11 +29,33 @@ def answer_number(text: str):
     return value if value.is_finite() else None
 
 
+def _answer_line(answer):
+    matches = re.findall(r"^[ \t]*(?:the answer is[ \t]+|answer[ \t]*:[ \t]*)([^\r\n]+)",
+                         answer, flags=re.IGNORECASE | re.MULTILINE)
+    value = matches[-1].strip() if matches else answer.strip()
+    if not value or "\n" in value or "\r" in value:
+        return None
+    wrapped = re.fullmatch(r"`([^`]+)`|\*\*(.+)\*\*", value)
+    return (wrapped.group(1) or wrapped.group(2)).strip() if wrapped else value
+
+
 def score_example(answer: str, example: Example):
     if example.answer_type == "numeric":
         prediction = answer_number(answer)
         correct = prediction is not None and prediction == Decimal(example.target)
         return {"prediction": str(prediction) if prediction is not None else None, "correct": correct}
+    if example.answer_type == "text":
+        prediction = _answer_line(answer)
+        return {"prediction": prediction, "correct": prediction == example.target}
+    if example.answer_type == "multi_choice":
+        letters = _answer_line(answer)
+        available = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ"[:len(example.choices)])
+        prediction = None
+        if letters and re.fullmatch(r"[A-Z](?:\s*,\s*[A-Z])*", letters.upper()):
+            labels = {letter.strip() for letter in letters.upper().split(",")}
+            if labels <= available:
+                prediction = ",".join(sorted(labels))
+        return {"prediction": prediction, "correct": prediction == example.target}
     if example.answer_type != "choice":
         raise ValueError("Unsupported answer type")
     matches = re.findall(r"(?:the answer is|answer\s*:|####)\s*(?:option\s*)?\(?([A-Z])\)?\s*[.!]?\s*$",

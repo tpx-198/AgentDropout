@@ -3,12 +3,16 @@
 const $ = (selector) => document.querySelector(selector);
 const names = { workspace: "实验工作台", models: "智能体与模型", experiments: "训练与评测", history: "运行记录" };
 const topologyNames = { full: "全连接", random: "随机", layered: "分层", chain: "链式", star: "星形", debate: "辩论式" };
-const datasetNames = { gsm8k: "GSM8K", aqua: "AQuA", svamp: "SVAMP", multiarith: "MultiArith" };
+const datasetNames = { gsm8k: "GSM8K", aqua: "AQuA", svamp: "SVAMP", multiarith: "MultiArith",
+  aptbench_swe: "APTBench-SWE", aptbench_dr: "APTBench-DR",
+  aptbench_tool: "APTBench-Tool", aptbench_math: "APTBench-Agentic Math" };
+const datasetTypes = { aqua: "单选", aptbench_swe: "单选 / 文本补全", aptbench_dr: "单选 / 多选 / 文本补全",
+  aptbench_tool: "工具名称 / 参数补全", aptbench_math: "单选 / 判断" };
 const roleNames = { "Math Solver": "数学求解", "Mathematical Analyst": "数学分析", "Programming Expert": "编程专家", Inspector: "检查员", FinalRefer: "最终汇总" };
 const statusNames = { queued: "准备中", running: "执行中", cancelling: "正在取消", completed: "已完成", cancelled: "已取消", failed: "失败", interrupted: "已中断", success: "完成" };
 const state = { config: null, token: "", roles: [], datasets: [], keyPresent: {}, pendingKeys: {}, clearKeys: new Set(),
   jobs: [], checkpoints: [], kind: "train", page: "workspace", selectedJob: null, job: null, preview: null,
-  dirty: false, polling: false, previewTimer: null };
+  previewKey: "", nodePruningSupported: false, dirty: false, polling: false, previewTimer: null };
 
 function jobTitle(job) {
   const time = new Date(job.created_at).toLocaleString("zh-CN", {
@@ -86,6 +90,9 @@ function resizeTeam(count) {
   state.config.roles = roles;
   state.config.topology.agents = count;
   state.config.evaluation.checkpoint = "";
+  for (const section of ["training", "evaluation"]) {
+    state.config[section].node_prune_count = Math.min(state.config[section].node_prune_count ?? 0, count - 2);
+  }
   syncForms();
   dirty();
   schedulePreview();
@@ -96,13 +103,17 @@ const bindings = {
   "initial-weight": ["topology", "initial_weight"], seed: ["topology", "seed"], density: ["topology", "density"],
   layers: ["topology", "layers"], "train-limit": ["training", "limit"], "train-steps": ["training", "steps"],
   "batch-size": ["training", "batch_size"], "learning-rate": ["training", "lr"], sparsity: ["training", "sparsity"],
-  "prune-rate": ["training", "prune_rate"], "eval-limit": ["evaluation", "limit"],
+  "prune-rate": ["training", "prune_rate"], "train-node-prune": ["training", "node_prune_count"],
+  "eval-node-prune": ["evaluation", "node_prune_count"], "eval-limit": ["evaluation", "limit"],
   "eval-mode": ["evaluation", "mode"], "eval-threshold": ["evaluation", "threshold"]
 };
 
 function syncForms() {
-  for (const [id, [section, field]] of Object.entries(bindings)) $("#" + id).value = state.config[section][field];
+  for (const [id, [section, field]] of Object.entries(bindings)) $("#" + id).value = state.config[section][field] ?? 0;
   $("#agents").value = state.config.topology.agents;
+  $("#train-node-prune").max = $("#eval-node-prune").max = state.config.topology.agents - 2;
+  $("#train-node-prune").disabled = $("#eval-node-prune").disabled = !state.nodePruningSupported;
+  $("#node-pruning-unavailable").hidden = state.nodePruningSupported;
   $("#sampling-temperature").value = state.config.sampling_temperature;
   $("#compare").checked = state.config.evaluation.compare;
   const roundSelect = $("#preview-round");
@@ -117,12 +128,16 @@ function syncForms() {
 
 function renderDatasetChoices() {
   for (const [prefix, section, split] of [["train", "training", "train"], ["eval", "evaluation", "test"]]) {
-    $("#" + prefix + "-datasets").innerHTML = state.datasets.map((item) => `<label class="dataset-choice"><input type="checkbox" data-dataset="${item.name}" data-section="${section}" ${state.config[section].datasets.includes(item.name) ? "checked" : ""}>${datasetNames[item.name]} <small> · ${item.splits[split] ?? 0}</small></label>`).join("");
+    $("#" + prefix + "-datasets").innerHTML = state.datasets.filter((item) => item.splits[split] > 0)
+      .map((item) => `<label class="dataset-choice"><input type="checkbox" data-dataset="${item.name}" data-section="${section}" ${state.config[section].datasets.includes(item.name) ? "checked" : ""}>${datasetNames[item.name]} <small> · ${item.splits[split]}</small></label>`).join("");
   }
 }
 
 function renderDatasetTable() {
-  $("#dataset-table").innerHTML = state.datasets.map((item) => `<tr><td class="dataset-name">${datasetNames[item.name]}</td><td>${(item.splits.train ?? 0).toLocaleString()}</td><td>${(item.splits.test ?? 0).toLocaleString()}</td><td class="dataset-type">${item.name === "aqua" ? "多项选择" : "数值推理"}</td><td><span class="badge teal">● 已就绪</span></td></tr>`).join("");
+  $("#dataset-table").innerHTML = state.datasets.map((item) => {
+    const status = item.splits.test ? ["teal", "已就绪"] : ["neutral", "待准备"];
+    return `<tr><td class="dataset-name">${datasetNames[item.name]}</td><td>${item.splits.train?.toLocaleString() ?? "—"}</td><td>${item.splits.test?.toLocaleString() ?? "—"}</td><td class="dataset-type">${datasetTypes[item.name] ?? "数值推理"}</td><td><span class="badge ${status[0]}">● ${status[1]}</span></td></tr>`;
+  }).join("");
 }
 
 function updateNumbers() {
@@ -130,29 +145,43 @@ function updateNumbers() {
   const config = state.config;
   const workers = config.topology.agents - 1;
   const rounds = config.topology.rounds;
+  const evalCalls = state.previewKey === topologyPreviewKey(config) ? state.preview?.calls_by_agent : null;
+  const fullCalls = Object.fromEntries(Object.keys(config.models).map((node) => [node, node === "final" ? 1 : rounds]));
+  const currentCalls = evalCalls ?? fullCalls;
+  const currentTotal = Object.values(currentCalls).reduce((sum, count) => sum + count, 0);
   $("#stat-agents").textContent = config.topology.agents;
   $("#stat-rounds").textContent = rounds;
-  $("#stat-calls").textContent = workers * rounds + 1;
+  $("#stat-calls").textContent = currentTotal;
   $("#stat-datasets").textContent = state.datasets.length;
-  $("#stat-call-formula").textContent = `${workers} 个讨论节点 × ${rounds} 轮 + 1`;
+  $("#stat-call-formula").textContent = currentTotal === workers * rounds + 1
+    ? `${workers} 个讨论节点 × ${rounds} 轮 + 1` : `${currentTotal - 1} 次讨论 + 1 次汇总`;
   $("#nav-agent-count").textContent = config.topology.agents;
   $("#weight-value").textContent = Number(config.topology.initial_weight).toFixed(2);
   $("#graph-label").textContent = `${topologyNames[config.topology.topology]}候选图`;
   $("#density").disabled = config.topology.topology !== "random";
   $("#layers").disabled = config.topology.topology !== "layered";
   $("#eval-threshold").disabled = config.evaluation.mode !== "threshold";
-  const groups = config.evaluation.checkpoint && config.evaluation.compare ? 2 : 1;
-  const examples = state.kind === "train" ? config.training.steps * config.training.batch_size : config.evaluation.limit * config.evaluation.datasets.length * groups;
-  const total = examples * (workers * rounds + 1);
-  const realPerQuestion = Object.entries(config.models).reduce((sum, [node, spec]) => sum + (spec.backend === "mock" ? 0 : node === "final" ? 1 : rounds), 0);
+  const training = state.kind === "train";
+  const compare = !training && config.evaluation.checkpoint && config.evaluation.compare;
+  const examplesPerGroup = training ? config.training.steps * config.training.batch_size
+    : config.evaluation.limit * config.evaluation.datasets.length;
+  const examples = examplesPerGroup * (compare ? 2 : 1);
+  const callsPerQuestion = training ? fullCalls : currentCalls;
+  const budget = Object.entries(config.models).reduce((sum, [node, spec]) => {
+    const calls = callsPerQuestion[node] + (compare ? fullCalls[node] : 0);
+    sum.total += calls;
+    if (spec.backend !== "mock") sum.real += calls;
+    return sum;
+  }, { total: 0, real: 0 });
+  const total = examplesPerGroup * budget.total;
   $("#budget-total").innerHTML = `${Number.isFinite(total) ? total.toLocaleString() : "—"}<small>次</small>`;
   $("#budget-team").textContent = `${config.topology.agents} / ${rounds}`;
   $("#budget-examples").textContent = examples;
-  $("#budget-real").textContent = (examples * realPerQuestion).toLocaleString();
-  $("#budget-backend").textContent = realPerQuestion ? "API ENABLED" : "MOCK";
-  $("#run-environment").textContent = realPerQuestion ? "独立模型 API" : "本地模拟";
-  $("#real-consent").hidden = realPerQuestion === 0;
-  $("#budget-note").textContent = realPerQuestion ? "真实请求使用各节点已保存的 API 配置。取消任务将在当前请求结束后生效。" : "模拟回答用于验证流程，结果标记为模拟诊断。";
+  $("#budget-real").textContent = (examplesPerGroup * budget.real).toLocaleString();
+  $("#budget-backend").textContent = budget.real ? "API ENABLED" : "MOCK";
+  $("#run-environment").textContent = budget.real ? "独立模型 API" : "本地模拟";
+  $("#real-consent").hidden = budget.real === 0;
+  $("#budget-note").textContent = budget.real ? "真实请求使用各节点已保存的 API 配置。取消任务将在当前请求结束后生效。" : "模拟回答用于验证流程，结果标记为模拟诊断。";
   const active = state.jobs.some((job) => ["queued", "running", "cancelling"].includes(job.status));
   $("#start-job").disabled = active;
   $("#start-job").textContent = active ? "任务执行中…" : state.kind === "train" ? "开始拓扑训练 ↗" : "开始测试集评测 ↗";
@@ -189,6 +218,10 @@ function renderCheckpoints() {
   select.value = state.config.evaluation.checkpoint;
 }
 
+function topologyPreviewKey(config) {
+  return JSON.stringify([config.topology, config.roles, config.evaluation.checkpoint, config.evaluation.node_prune_count ?? 0]);
+}
+
 function schedulePreview() {
   clearTimeout(state.previewTimer);
   state.previewTimer = setTimeout(refreshPreview, 400);
@@ -196,21 +229,24 @@ function schedulePreview() {
 
 async function refreshPreview() {
   try {
-    const signature = JSON.stringify(state.config);
+    const signature = topologyPreviewKey(state.config);
     const preview = await api("/api/preview", { config: state.config });
-    if (signature !== JSON.stringify(state.config)) return;
+    if (signature !== topologyPreviewKey(state.config)) return;
     state.preview = preview;
+    state.previewKey = signature;
     renderGraph();
+    updateNumbers();
   } catch (error) {
     $("#graph-note").textContent = error.message;
   }
 }
 
 function renderGraph() {
-  if (!state.preview) return;
+  if (!state.preview || state.previewKey !== topologyPreviewKey(state.config)) return;
   const count = state.config.topology.agents - 1;
   const round = Math.min(Number($("#preview-round").value || 0), state.preview.execution.rounds.length - 1);
   const graph = state.preview.execution.rounds[round];
+  const active = new Set(graph.active ?? Array.from({ length: count }, (_, index) => index));
   const positions = Array.from({ length: count }, (_, index) => {
     const angle = count === 1 ? 0 : -Math.PI / 2 + index * Math.PI * 2 / count;
     return { x: 255 + (count === 1 ? 0 : 148 * Math.cos(angle)), y: 182 + (count === 1 ? 0 : 108 * Math.sin(angle)) };
@@ -228,14 +264,16 @@ function renderGraph() {
   }
   let markup = '<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="none" stroke="#248b76"/></marker><marker id="arrow-summary" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="none" stroke="#9daeb1"/></marker></defs>';
   for (const [source, target] of graph.spatial) markup += edge(positions[source], positions[target], state.preview.weights.spatial[round][source][target], false);
-  for (const index of state.preview.execution.summary) markup += edge(positions[index], final, state.preview.weights.summary[index], true);
+  if (round === state.preview.execution.rounds.length - 1) {
+    for (const index of state.preview.execution.summary) markup += edge(positions[index], final, state.preview.weights.summary[index], true);
+  }
   positions.forEach((point, index) => {
     const role = state.config.roles[index];
-    markup += `<g class="graph-node" data-graph-node="agent_${index + 1}" tabindex="0" role="button" aria-label="配置 agent_${index + 1}"><circle cx="${point.x}" cy="${point.y}" r="29" fill="#f0f8f4" stroke="#c8dfd4"/><text x="${point.x}" y="${point.y + 5}" text-anchor="middle" fill="#33876b" font-size="13" font-weight="600">A${index + 1}</text><rect x="${point.x - 43}" y="${point.y + 34}" width="86" height="34" rx="4" fill="white" opacity=".9"/><text x="${point.x}" y="${point.y + 46}" text-anchor="middle" fill="#527267" font-size="10">${escape(roleNames[role])}</text><text x="${point.x}" y="${point.y + 59}" text-anchor="middle" fill="#a2b0b4" font-size="8">agent_${index + 1}</text></g>`;
+    markup += `<g class="graph-node${active.has(index) ? "" : " graph-node-pruned"}" data-graph-node="agent_${index + 1}" tabindex="0" role="button" aria-label="配置 agent_${index + 1}${active.has(index) ? "" : "（本轮已剪除）"}"><circle cx="${point.x}" cy="${point.y}" r="29" fill="#f0f8f4" stroke="#c8dfd4"/><text x="${point.x}" y="${point.y + 5}" text-anchor="middle" fill="#33876b" font-size="13" font-weight="600">A${index + 1}</text><rect x="${point.x - 43}" y="${point.y + 34}" width="86" height="34" rx="4" fill="white" opacity=".9"/><text x="${point.x}" y="${point.y + 46}" text-anchor="middle" fill="#527267" font-size="10">${escape(roleNames[role])}</text><text x="${point.x}" y="${point.y + 59}" text-anchor="middle" fill="#a2b0b4" font-size="8">${active.has(index) ? `agent_${index + 1}` : "本轮已剪除"}</text></g>`;
   });
   markup += `<g class="graph-node" data-graph-node="final" tabindex="0" role="button" aria-label="配置最终汇总者"><rect x="${final.x - 36}" y="${final.y - 32}" width="72" height="64" rx="16" fill="#f0edf8" stroke="#dcd5eb"/><text x="${final.x}" y="${final.y + 7}" text-anchor="middle" font-size="24" fill="#8d76b4">Σ</text><text x="${final.x}" y="${final.y + 52}" text-anchor="middle" font-size="11" fill="#73638b">最终汇总</text><text x="${final.x}" y="${final.y + 66}" text-anchor="middle" font-size="8" fill="#a5a0b4">FinalRefer</text></g>`;
   $("#topology-svg").innerHTML = markup;
-  $("#graph-edge-count").textContent = `${graph.spatial.length} 条轮内边 · ${graph.temporal.length} 条跨轮边`;
+  $("#graph-edge-count").textContent = `${active.size} 个讨论节点 · ${graph.spatial.length} 条轮内边 · ${graph.temporal.length} 条跨轮边`;
   $("#graph-note").textContent = state.config.evaluation.checkpoint ? "当前展示所选检查点保留的通信边，边上数字为已学习的权重。" : "预览展示保留候选边对应的无环执行图。实际运行按权重采样，跨轮边读取上一轮回答。";
 }
 
@@ -398,6 +436,7 @@ function bindEvents() {
         if (field === "rounds" && Number.isInteger(state.config.topology.rounds) && state.config.topology.rounds > 0 && state.config.topology.rounds <= 10) syncForms();
         schedulePreview();
       }
+      if (id === "eval-node-prune") schedulePreview();
       dirty();
     });
   }
@@ -422,7 +461,8 @@ function bindEvents() {
     const input = event.target.closest("[data-dataset]");
     if (!input) return;
     const section = state.config[input.dataset.section];
-    section.datasets = state.datasets.filter((item) => $( `[data-section="${input.dataset.section}"][data-dataset="${item.name}"]`).checked).map((item) => item.name);
+    section.datasets = Array.from(document.querySelectorAll(`[data-section="${input.dataset.section}"]:checked`),
+      (checkbox) => checkbox.dataset.dataset);
     dirty();
   });
   $("#model-cards").addEventListener("input", (event) => {
@@ -496,6 +536,7 @@ function bindEvents() {
 async function bootstrap() {
   try {
     const result = await api("/api/bootstrap");
+    state.nodePruningSupported = result.node_pruning === true;
     state.config = result.config; state.token = result.token; state.roles = result.roles;
     state.datasets = result.datasets; state.keyPresent = result.key_present; state.jobs = result.jobs; state.checkpoints = result.checkpoints;
     bindEvents(); syncForms(); setKind(state.kind); renderDatasetTable(); renderHistory(); await refreshPreview();

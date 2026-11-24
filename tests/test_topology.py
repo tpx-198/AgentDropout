@@ -94,6 +94,39 @@ class TopologyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "outside"):
                 load_policy(path)
 
+    def test_node_pruning_is_per_round_and_updates_all_incident_edges(self):
+        policy = EdgePolicy(TopologyConfig(agents=5, rounds=2, temporal="full"))
+        with torch.no_grad():
+            for round_index, worker in enumerate([0, 2]):
+                policy.spatial_logits[round_index, worker, :] = -8
+                policy.spatial_logits[round_index, :, worker] = -8
+        self.assertEqual(policy.prune_nodes(1), [[0], [2]])
+        self.assertFalse(policy.spatial_mask[0, 0, :].any())
+        self.assertFalse(policy.spatial_mask[1, :, 2].any())
+        self.assertFalse(policy.temporal_mask[0, 0, :].any())
+        self.assertFalse(policy.temporal_mask[0, :, 2].any())
+        self.assertTrue(policy.temporal_mask[0, 2, 0])
+        self.assertEqual(policy.summary_mask.tolist(), [True, True, False, True])
+        with self.assertRaisesRegex(ValueError, "at least one"):
+            policy.prune_nodes(3)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "nodes.pt"
+            save_policy(path, policy, {})
+            loaded, _ = load_policy(path)
+            self.assertEqual(loaded.report(), policy.report())
+
+    def test_legacy_checkpoints_restore_all_discussion_nodes(self):
+        policy = EdgePolicy(TopologyConfig())
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "legacy.pt"
+            save_policy(path, policy, {})
+            payload = torch.load(path, weights_only=True)
+            payload["schema_version"] = 1
+            del payload["state"]["node_mask"]
+            torch.save(payload, path)
+            loaded, _ = load_policy(path)
+            self.assertTrue(loaded.node_mask.all())
+
     def test_invalid_arguments_and_cycles(self):
         for settings in ({"agents": 1}, {"rounds": 0}, {"initial_weight": 1}, {"initial_weight": float('nan')},
                          {"density": -0.1}, {"layers": 0}, {"topology": "missing"}):

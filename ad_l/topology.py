@@ -125,6 +125,7 @@ class EdgePolicy(nn.Module):
         super().__init__()
         self.config = config
         spatial, temporal = candidate_masks(config)
+        self.register_buffer("node_mask", torch.ones(config.rounds, config.workers, dtype=torch.bool))
         initial_logit = math.log(config.initial_weight / (1 - config.initial_weight))
         for kind, mask in (("spatial", spatial), ("temporal", temporal),
                            ("summary", torch.ones(config.workers, dtype=torch.bool))):
@@ -134,6 +135,16 @@ class EdgePolicy(nn.Module):
     def weights(self):
         return {kind: torch.sigmoid(getattr(self, f"{kind}_logits")) * getattr(self, f"{kind}_mask")
                 for kind in ("spatial", "temporal", "summary")}
+
+    def _node_edge_masks(self):
+        active = self.node_mask
+        return {"spatial": active[:, :, None] & active[:, None, :],
+                "temporal": active[:-1, :, None] & active[1:, None, :],
+                "summary": active[-1]}
+
+    def calls_by_agent(self, team, examples=1):
+        rounds = self.node_mask.sum(dim=0).tolist()
+        return {agent.node_id: examples * count for agent, count in zip(team, [*rounds, 1])}
 
     def sample(self, generator: torch.Generator, *, mode="sampled", threshold=0.5, temperature=1.0):
         if mode not in {"sampled", "fixed", "threshold"}:
@@ -167,7 +178,8 @@ class EdgePolicy(nn.Module):
                     if (round_index > 0 and self.temporal_mask[round_index - 1, source, target]
                             and selected(self.temporal_logits[round_index - 1, source, target])):
                         temporal.append([source, target])
-            rounds.append({"spatial": spatial, "temporal": temporal})
+            rounds.append({"active": self.node_mask[round_index].nonzero().flatten().tolist(),
+                           "spatial": spatial, "temporal": temporal})
         summary = [i for i in range(size) if self.summary_mask[i] and selected(self.summary_logits[i])]
         return SampledTopology({"rounds": rounds, "summary": summary}, torch.stack(terms).sum())
 
@@ -180,6 +192,36 @@ class EdgePolicy(nn.Module):
                 terms.append(torch.linalg.svdvals(weights[kind]).sum(-1).mean())
         terms.append(weights["summary"].mean())
         return torch.stack(terms).sum()
+
+    @torch.no_grad()
+    def prune_nodes(self, count: int):
+        """Remove the lowest-scoring active workers in each round, retaining at least one."""
+        if type(count) is not int or not 0 <= count < int(self.node_mask.sum(dim=1).min()):
+            raise ValueError("Node pruning must leave at least one discussion agent in every round")
+        if count == 0:
+            return []
+        if not all(torch.isfinite(value).all() for value in self.parameters()):
+            raise ValueError("Cannot prune nonfinite logits")
+
+        weights = self.weights()
+        totals = weights["spatial"].sum(dim=1) + weights["spatial"].sum(dim=2)
+        counts = self.spatial_mask.sum(dim=1) + self.spatial_mask.sum(dim=2)
+        totals[:-1] += weights["temporal"].sum(dim=2)
+        totals[1:] += weights["temporal"].sum(dim=1)
+        counts[:-1] += self.temporal_mask.sum(dim=2)
+        counts[1:] += self.temporal_mask.sum(dim=1)
+        totals[-1] += weights["summary"]
+        counts[-1] += self.summary_mask
+        scores = totals / counts.clamp_min(1)
+        removed = []
+        for active, round_scores in zip(self.node_mask, scores):
+            workers = active.nonzero().flatten()
+            lowest = workers[torch.argsort(round_scores[workers], stable=True)[:count]]
+            active[lowest] = False
+            removed.append(lowest.tolist())
+        for kind, allowed in self._node_edge_masks().items():
+            getattr(self, f"{kind}_mask").logical_and_(allowed)
+        return removed
 
     @torch.no_grad()
     def prune(self, rate: float):
@@ -203,13 +245,14 @@ class EdgePolicy(nn.Module):
 
     def report(self):
         return {"config": asdict(self.config),
+                "active_workers_by_round": [row.nonzero().flatten().tolist() for row in self.node_mask],
                 "weights": {name: value.detach().tolist() for name, value in self.weights().items()}}
 
 
 def save_policy(path: Path, policy: EdgePolicy, metadata: dict):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"schema_version": 1, "config": asdict(policy.config), "metadata": metadata,
+    payload = {"schema_version": 2, "config": asdict(policy.config), "metadata": metadata,
                "state": {name: value.detach().cpu().clone() for name, value in policy.state_dict().items()}}
     temporary = None
     try:
@@ -224,11 +267,14 @@ def save_policy(path: Path, policy: EdgePolicy, metadata: dict):
 
 def load_policy(path: Path):
     payload = torch.load(path, map_location="cpu", weights_only=True)
-    if payload.get("schema_version") != 1:
+    schema = payload.get("schema_version")
+    if schema not in (1, 2):
         raise ValueError("Unsupported topology checkpoint")
     policy = EdgePolicy(TopologyConfig(**payload["config"]))
     expected = policy.state_dict()
     state = payload["state"]
+    if schema == 1 and "node_mask" not in state:
+        state = {**state, "node_mask": expected["node_mask"]}
     if set(state) != set(expected):
         raise ValueError("Incomplete topology checkpoint")
     for name, value in state.items():
@@ -239,4 +285,8 @@ def load_policy(path: Path):
         if not torch.isfinite(value).all():
             raise ValueError("Checkpoint contains nonfinite values")
     policy.load_state_dict(state)
+    if not policy.node_mask.any(dim=1).all():
+        raise ValueError("Checkpoint disables every discussion agent in a round")
+    if any((getattr(policy, f"{kind}_mask") & ~allowed).any() for kind, allowed in policy._node_edge_masks().items()):
+        raise ValueError("Checkpoint contains edges connected to pruned nodes")
     return policy, payload["metadata"]

@@ -59,8 +59,10 @@ def load_agent_config(path: Path, team):
     return {"path": str(Path(path).resolve()), "sha256": hashlib.sha256(raw).hexdigest(), "nodes": nodes}
 
 
-def create_agent_models(config, *, allow_real_api=False, env_file: Path | None = None):
+def create_agent_models(config, *, allow_real_api=False, env_file: Path | None = None, active_nodes=None):
     nodes = config["nodes"]
+    if active_nodes is not None:
+        nodes = {node: spec for node, spec in nodes.items() if node in active_nodes}
     real_nodes = [node for node, spec in nodes.items() if spec.get("backend", "deepseek") != "mock"]
     if real_nodes and not allow_real_api:
         raise ValueError("Real agent APIs require --allow-real-api")
@@ -82,8 +84,9 @@ def create_agent_models(config, *, allow_real_api=False, env_file: Path | None =
     return adapters, {node: adapter.settings for node, adapter in adapters.items()}
 
 
-def model_call_plan(config, team, rounds: int, examples: int):
-    calls_by_node = {agent.node_id: examples * (1 if agent == team[-1] else rounds) for agent in team}
+def model_call_plan(config, team, rounds: int, examples: int, *, calls_by_node=None):
+    if calls_by_node is None:
+        calls_by_node = {agent.node_id: examples * (1 if agent == team[-1] else rounds) for agent in team}
     real_calls = sum(calls for node, calls in calls_by_node.items()
                      if config["nodes"][node].get("backend", "deepseek") != "mock")
     return {"agent_api_config": config, "planned_model_calls_by_agent": calls_by_node,

@@ -63,6 +63,26 @@ class SystemTests(unittest.TestCase):
         state = build_system(team, execution, self.adapters(team)).invoke({"task": "3 + 2?"})
         self.assertEqual(state["trace"][-1]["spatial"].keys(), {"agent_3", "agent_4"})
 
+    def test_pruned_workers_skip_calls_and_never_supply_stale_outputs(self):
+        team = create_team()
+        execution = {"rounds": [
+            {"active": [0, 2], "spatial": [[0, 2]], "temporal": []},
+            {"active": [1, 2], "spatial": [], "temporal": [[0, 1], [2, 2]]},
+        ], "summary": [1, 2]}
+        adapters = self.adapters(team)
+        del adapters["agent_4"]
+        graph = build_system(team, execution, adapters)
+        for state in (graph.invoke({"task": "3 + 2?"}),
+                      asyncio.run(graph.ainvoke({"task": "3 + 2?"}))):
+            self.assertEqual(state["model_calls"], 5)
+            self.assertEqual(state["round_outputs"][0].keys(), {"agent_1", "agent_3"})
+            self.assertEqual(state["round_outputs"][1].keys(), {"agent_2", "agent_3"})
+            self.assertEqual(state["trace"][2]["temporal"].keys(), {"agent_1"})
+            self.assertEqual(state["trace"][-1]["spatial"].keys(), {"agent_2", "agent_3"})
+        execution["summary"].append(0)
+        with self.assertRaisesRegex(ValueError, "Final aggregation uses a pruned node"):
+            build_system(team, execution, adapters)
+
     def test_model_failure_stops_and_hides_error_secrets(self):
         team = create_team()
         execution = EdgePolicy(TopologyConfig()).sample(torch.Generator(), mode="fixed").execution

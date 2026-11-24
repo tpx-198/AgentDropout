@@ -437,6 +437,9 @@ main {
 .graph-node {
   cursor:pointer
 }
+.graph-node-pruned {
+  opacity:.55
+}
 .graph-node:hover rect,.graph-node:hover circle {
   stroke:var(--teal);
   stroke-width:2

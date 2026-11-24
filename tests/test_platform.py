@@ -12,9 +12,11 @@ import unittest
 from unittest.mock import patch
 
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from langchain_core.messages import AIMessage
 
 from ad_l.models import ModelAdapter
 from ad_l.platform_service import PlatformService, SettingsStore, default_config
+from ad_l.roles import PROMPTS
 from ad_l.topology import load_policy
 from platform_server import make_handler
 
@@ -92,6 +94,90 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(baseline, trained)
         self.assertTrue(all(row['split'] == 'test' for row in rows))
         self.assertEqual(result['summary']['trained']['attempted'], 8)
+
+    def test_evaluation_blocks_prompt_overlap_outside_sampled_questions(self):
+        self.config['evaluation'].update(datasets=['aqua'], limit=1)
+        plan = self.service.plan(self.config, 'evaluate')
+        self.assertNotIn('aqua:test:0', plan['sample_ids'])
+
+        decision = {**PROMPTS['decision'], 'few_shot': 'Q: AQUA  TEST\nquestion 0: 3 + 2?\nA: A'}
+        with patch.dict(PROMPTS, {'decision': decision}):
+            with self.assertRaisesRegex(ValueError, r'FinalRefer \(few_shot\): aqua:test:0'):
+                self.service.submit('evaluate', self.config)
+        self.assertEqual(self.service.history(), [])
+
+    def test_node_pruning_produces_a_checkpoint_and_reduces_paired_call_budget(self):
+        self.config["training"].update(datasets=["gsm8k"], steps=1, batch_size=1,
+                                       node_prune_count=1, prune_rate=0)
+        self.config["evaluation"].update(datasets=["gsm8k"], limit=1)
+        training = self.service.submit("train", self.config)
+        self.wait_for_idle()
+        self.assertEqual(self.service.public_job(training["id"])["summary"]["model_calls"], 9)
+        self.config["evaluation"]["checkpoint"] = f"job:{training['id']}"
+        preview = self.service.preview(self.config)
+        self.assertEqual([len(round["active"]) for round in preview["execution"]["rounds"]], [3, 3])
+        plan = self.service.plan(self.config, "evaluate")
+        self.assertEqual(plan["calls_by_group"], {"baseline": 9, "trained": 7})
+        job = self.service.submit("evaluate", self.config)
+        self.wait_for_idle()
+        result = self.service.public_job(job["id"])
+        self.assertEqual(result["status"], "completed")
+        for group, calls in plan["calls_by_group"].items():
+            self.assertEqual(result["summary"][group]["model_calls"], calls)
+
+    def test_evaluation_prunes_an_inactive_real_backend_before_credentials_are_required(self):
+        self.config["evaluation"].update(datasets=["gsm8k"], limit=1, node_prune_count=1)
+        self.config["models"]["agent_1"].update(backend="openai", model="requires-credentials")
+        plan = self.service.plan(self.config, "evaluate")
+        self.assertEqual(plan["calls_by_agent"]["agent_1"], 0)
+        self.assertEqual(plan["real_api_calls"], 0)
+        job = self.service.submit("evaluate", self.config)
+        self.wait_for_idle()
+        result = self.service.public_job(job["id"])
+        self.assertEqual(result["status"], "completed", result["message"])
+        self.assertEqual(result["summary"]["current"]["model_calls"], 7)
+
+    def test_aptbench_runs_as_evaluation_only_with_task_specific_prompts(self):
+        dataset = 'aptbench_dr'
+        directory = self.root / 'data' / dataset
+        directory.mkdir()
+        rows = [
+            {'id': 'aptbench_dr:choice', 'dataset': dataset, 'split': 'test',
+             'question': 'Select supported statements.', 'answer_type': 'multi_choice',
+             'choices': ['one', 'two', 'three', 'four'], 'target': 'B,D'},
+            {'id': 'aptbench_dr:text', 'dataset': dataset, 'split': 'test',
+             'question': 'Give the concise research result.', 'answer_type': 'text', 'target': 'PRIVATE_TEXT_RESULT'},
+        ]
+        (directory / 'test.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        self.assertIn({'name': dataset, 'splits': {'test': 2}}, self.service.dataset_catalog())
+        self.config['evaluation'].update(datasets=[dataset], limit=2)
+        self.assertEqual(self.service.plan(self.config, 'evaluate')['model_calls'], 18)
+
+        def respond(adapter, messages):
+            system = messages[0].content
+            if not system.startswith('Select or produce'):
+                return AIMessage(content='I reviewed the evidence.')
+            if 'comma-separated' in system:
+                return AIMessage(content='The answer is D, B')
+            return AIMessage(content='The answer is PRIVATE_TEXT_RESULT')
+
+        with patch.object(ModelAdapter, 'invoke', respond):
+            job = self.service.submit('evaluate', self.config)
+            self.wait_for_idle()
+        result = self.service.export(job['id'])
+        self.assertEqual(result['summary']['status'], 'completed')
+        for row in result['details']['rows']:
+            self.assertTrue(row['correct'])
+            for call in row['result']['trace']:
+                self.assertNotIn('PRIVATE_TEXT_RESULT', str(call['messages']))
+                self.assertIn('supplied context', call['messages'][0]['content'])
+                original = PROMPTS['decision'] if call['node_id'] == 'final' else PROMPTS['roles'][call['role']]
+                if original['few_shot']:
+                    self.assertNotIn(original['few_shot'].strip(), call['messages'][-1]['content'])
+
+        self.config['training']['datasets'] = [dataset]
+        with self.assertRaisesRegex(ValueError, '有效数据集'):
+            self.service.plan(self.config, 'train')
 
     def test_cancel_stops_between_calls_and_blocks_concurrent_jobs(self):
         entered, release = threading.Event(), threading.Event()

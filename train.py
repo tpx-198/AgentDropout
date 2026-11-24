@@ -13,7 +13,7 @@ from ad_l.cli import ROOT, add_arguments, adapters_from_args, print_plan, resolv
 from ad_l.roles import PROMPTS
 from ad_l.topology import save_policy
 from ad_l.training import load_examples, train_step
-from ad_l.datasets import DATASETS, load_training_mix
+from ad_l.datasets import TRAIN_DATASETS, load_training_mix
 from ad_l.model_config import load_agent_config, model_call_plan
 
 
@@ -22,7 +22,7 @@ def main():
     add_arguments(parser)
     data_source = parser.add_mutually_exclusive_group()
     data_source.add_argument("--data", type=Path, help="One legacy GSM8K or normalized training JSONL file")
-    data_source.add_argument("--datasets", choices=DATASETS, nargs="+", help="Datasets to mix; default all four")
+    data_source.add_argument("--datasets", choices=TRAIN_DATASETS, nargs="+", help="Datasets to mix; default all four")
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
     parser.add_argument("--limit", type=int, default=6, help="Selected training questions per dataset")
     parser.add_argument("--steps", type=int, default=3)
@@ -44,17 +44,21 @@ def main():
         if args.output.exists():
             raise ValueError("output already exists; choose a new file")
         policy, team = resolve_policy(args)
+        if not 0 <= args.node_prune_count < policy.config.workers:
+            raise ValueError("--node-prune-count must leave at least one discussion agent in every round")
         agent_config = load_agent_config(args.api_config, team) if args.api_config else None
         if args.data is not None:
             examples, dataset = load_examples(args.data, args.limit, args.seed)
         else:
-            examples, dataset = load_training_mix(args.data_dir, args.datasets or DATASETS, args.limit, args.seed)
+            examples, dataset = load_training_mix(args.data_dir, args.datasets or TRAIN_DATASETS, args.limit, args.seed)
         plan = print_plan(policy, team, args.steps * args.batch_size)
+        plan["node_prune_count"] = args.node_prune_count
         plan["planned_real_api_calls"] = plan["planned_model_calls"] if args.deepseek else 0
         plan["dataset"] = dataset
         plan["sample_ids"] = [example.sample_id for example in examples]
         if agent_config is not None:
-            plan.update(model_call_plan(agent_config, team, policy.config.rounds, args.steps * args.batch_size))
+            plan.update(model_call_plan(agent_config, team, policy.config.rounds, args.steps * args.batch_size,
+                                        calls_by_node=plan["planned_model_calls_by_agent"]))
         if args.plan:
             print(json.dumps(plan, ensure_ascii=False, indent=2))
             return
@@ -72,7 +76,7 @@ def main():
     metadata = {**plan, "settings": {node: asdict(value) for node, value in settings.items()},
                 "roles": [agent.role for agent in team[:-1]],
                 "hyperparameters": {name: getattr(args, name) for name in (
-                    "seed", "steps", "batch_size", "lr", "sparsity", "prune_rate", "sampling_temperature")},
+                    "seed", "steps", "batch_size", "lr", "sparsity", "prune_rate", "node_prune_count", "sampling_temperature")},
                 "metrics_kind": metrics_kind,
                 "prompt_source": PROMPTS["source"], "history": history, "pruning": None,
                 "versions": {name: version(name) for name in ("torch", "langgraph", "langchain-core", "langchain-deepseek")}}
@@ -89,11 +93,14 @@ def main():
         print(f"Step {step + 1}/{args.steps} | status {report['status']} | loss {report.get('loss')} | real calls {real_calls}")
         if report["status"] != "success":
             raise SystemExit("Model execution failed; the current batch was not updated")
+    node_pruning = policy.prune_nodes(args.node_prune_count)
     pruning = policy.prune(args.prune_rate)
-    metadata.update(pruning=pruning, status="success")
+    metadata.update(pruning=pruning, node_pruning=node_pruning, status="success")
     save_policy(args.output, policy, metadata)
     print(f"Saved {args.output.resolve()}")
     print(f"Pruning {json.dumps(pruning)}")
+    if node_pruning:
+        print(f"Pruned discussion node indices by round {json.dumps(node_pruning)}")
 
 
 if __name__ == "__main__":

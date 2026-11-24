@@ -59,6 +59,7 @@ def make_handler(service, token):
                     self._reply(200, {"app": "ad-l-platform", "version": 1})
                 elif path == "/api/bootstrap":
                     self._reply(200, {**service.store.public(), "token": token, "datasets": service.dataset_catalog(),
+                                      "node_pruning": True,
                                       "roles": list(ROLE_CYCLE), "jobs": service.history(), "checkpoints": service.checkpoints()})
                 elif path == "/api/jobs":
                     self._reply(200, {"jobs": service.history(), "checkpoints": service.checkpoints()})

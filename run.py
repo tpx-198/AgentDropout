@@ -31,20 +31,23 @@ def main():
             raise ValueError("output already exists; choose a new file")
         policy, team = resolve_policy(args, args.checkpoint)
         agent_config = load_agent_config(args.api_config, team) if args.api_config else None
+        node_pruning = policy.prune_nodes(args.node_prune_count)
         pruning = policy.prune(args.prune_rate)
         generator = torch.Generator().manual_seed(args.seed)
         with torch.no_grad():
             sampled = policy.sample(generator, mode=args.mode, threshold=args.threshold,
                                     temperature=args.sampling_temperature)
-        plan = {**print_plan(policy, team), "planned_real_api_calls":
-                policy.config.workers * policy.config.rounds + 1 if args.deepseek else 0,
-                "execution": sampled.execution, "pruning": pruning}
+        plan = print_plan(policy, team)
+        plan.update(planned_real_api_calls=plan["planned_model_calls"] if args.deepseek else 0,
+                    execution=sampled.execution, pruning=pruning, node_pruning=node_pruning)
+        calls = plan["planned_model_calls_by_agent"]
         if agent_config is not None:
-            plan.update(model_call_plan(agent_config, team, policy.config.rounds, 1))
+            plan.update(model_call_plan(agent_config, team, policy.config.rounds, 1, calls_by_node=calls))
         if args.plan:
             print(json.dumps(plan, ensure_ascii=False, indent=2))
             return
-        adapters, settings = adapters_from_args(args, team, agent_config)
+        adapters, settings = adapters_from_args(args, team, agent_config,
+                                                active_nodes={node for node, count in calls.items() if count})
     except (OSError, ValueError, KeyError) as error:
         parser.error(str(error))
     except Exception as error:
