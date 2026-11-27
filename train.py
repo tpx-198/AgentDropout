@@ -84,7 +84,7 @@ def main():
         batch = [examples[(step * args.batch_size + offset) % len(examples)] for offset in range(args.batch_size)]
         report = train_step(policy, optimizer, batch, adapters, generator, sparsity=args.sparsity,
                             temperature=args.sampling_temperature, allow_real_api=args.deepseek or args.allow_real_api,
-                            roles=[agent.role for agent in team[:-1]])
+                            roles=metadata["roles"], role_prompts=metadata["role_prompts"])
         history.append({"step": step + 1, **report})
         real_calls = sum(episode["result"]["real_api_calls"] for item in history for episode in item["episodes"])
         metadata.update(real_api_calls=real_calls, completed_steps=step + int(report["status"] == "success"),

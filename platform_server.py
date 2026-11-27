@@ -14,7 +14,7 @@ import webbrowser
 from urllib.request import build_opener, ProxyHandler
 
 from ad_l.platform_service import PlatformService
-from ad_l.roles import ROLE_CYCLE
+from ad_l.roles import PROMPTS, ROLE_CYCLE
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
@@ -58,9 +58,12 @@ def make_handler(service, token):
                 if path == "/api/health":
                     self._reply(200, {"app": "ad-l-platform", "version": 1})
                 elif path == "/api/bootstrap":
+                    examples = {role: PROMPTS["roles"][role]["system"] for role in ROLE_CYCLE}
+                    examples["FinalRefer"] = PROMPTS["decision"]["system"]
                     self._reply(200, {**service.store.public(), "token": token, "datasets": service.dataset_catalog(),
-                                      "node_pruning": True,
-                                      "roles": list(ROLE_CYCLE), "jobs": service.history(), "checkpoints": service.checkpoints()})
+                                      "node_pruning": True, "team_preserving_import": True,
+                                      "roles": list(ROLE_CYCLE), "role_examples": examples,
+                                      "jobs": service.history(), "checkpoints": service.checkpoints()})
                 elif path == "/api/jobs":
                     self._reply(200, {"jobs": service.history(), "checkpoints": service.checkpoints()})
                 elif re.fullmatch(r"/api/jobs/[a-f0-9]{32}", path):

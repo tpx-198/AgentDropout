@@ -139,7 +139,7 @@
 </div>
 <div class="card-body form-stack">
 <div class="two-columns">
-<label>智能体总数<input id="agents" type="number" min="2" max="32" value="5">
+<label>初始智能体总数<input id="agents" data-team-size type="number" min="2" max="32" step="1" value="5">
 </label>
 <label>讨论轮数<input id="rounds" type="number" min="1" max="10" value="2">
 </label>
@@ -223,7 +223,7 @@
 <div>
 <span class="eyebrow">AGENTS & MODELS</span>
 <h1>智能体与模型</h1>
-<p>为每个角色单独选择服务、模型和 API 密钥。</p>
+<p>为每个节点填写角色名称和职责，并配置模型与 API。填写职责后会替换该节点的默认提示词和示例题。</p>
 </div>
 <button class="button" id="import-config">导入现有 API 配置</button>
 </div>
@@ -233,8 +233,9 @@
 <strong>配置保存在本机</strong>
 <p>密钥使用本机受限文件保存，页面只显示保存状态。留空可沿用已有密钥。</p>
 </div>
-<button class="button primary" id="save-models">保存模型配置</button>
+<button class="button primary" id="save-models">保存智能体配置</button>
 </div>
+<p id="role-config-unavailable" hidden>请重启评测平台以启用自定义角色。</p>
 <div id="model-cards" class="model-grid">
 </div>
 </section>
@@ -259,6 +260,9 @@
 <span class="muted" id="split-label">TRAIN SPLIT</span>
 </div>
 <div class="card-body form-stack">
+<label>初始智能体总数<input id="experiment-agents" data-team-size type="number" min="2" max="32" step="1" value="5">
+<small class="helper">含 1 个最终汇总智能体。</small>
+</label>
 <div id="training-fields">
 <label>训练数据集</label>
 <div id="train-datasets" class="dataset-choices">

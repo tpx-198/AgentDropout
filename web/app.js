@@ -12,7 +12,8 @@ const roleNames = { "Math Solver": "数学求解", "Mathematical Analyst": "数�
 const statusNames = { queued: "准备中", running: "执行中", cancelling: "正在取消", completed: "已完成", cancelled: "已取消", failed: "失败", interrupted: "已中断", success: "完成" };
 const state = { config: null, token: "", roles: [], datasets: [], keyPresent: {}, pendingKeys: {}, clearKeys: new Set(),
   jobs: [], checkpoints: [], kind: "train", page: "workspace", selectedJob: null, job: null, preview: null,
-  previewKey: "", nodePruningSupported: false, dirty: false, polling: false, previewTimer: null };
+  previewKey: "", nodePruningSupported: false, teamPreservingImport: false, roleExamples: null,
+  dirty: false, polling: false, previewTimer: null };
 
 function jobTitle(job) {
   const time = new Date(job.created_at).toLocaleString("zh-CN", {
@@ -23,6 +24,15 @@ function jobTitle(job) {
 
 function escape(value) {
   return String(value ?? "").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[character]));
+}
+
+function roleLabel(node, preset) {
+  return state.config.role_prompts?.[node]?.name?.trim() || roleNames[preset];
+}
+
+function graphRoleLabel(node, preset) {
+  const characters = Array.from(roleLabel(node, preset));
+  return escape(characters.length > 10 ? `${characters.slice(0, 9).join("")}…` : characters.join(""));
 }
 
 function toast(message, error = false) {
@@ -78,6 +88,7 @@ function newModel() {
 }
 
 function resizeTeam(count) {
+  if (count === state.config.topology.agents) return;
   const models = {};
   const roles = [];
   for (let index = 0; index < count - 1; index++) {
@@ -86,6 +97,12 @@ function resizeTeam(count) {
     roles.push(state.config.roles[index] || state.roles[index % state.roles.length]);
   }
   models.final = state.config.models.final || newModel();
+  for (const node of Object.keys(state.config.models)) {
+    if (node in models) continue;
+    delete state.pendingKeys[node];
+    delete state.config.role_prompts?.[node];
+    state.clearKeys.delete(node);
+  }
   state.config.models = models;
   state.config.roles = roles;
   state.config.topology.agents = count;
@@ -96,6 +113,16 @@ function resizeTeam(count) {
   syncForms();
   dirty();
   schedulePreview();
+}
+
+function changeTeamSize(input) {
+  const count = input.valueAsNumber;
+  if (!Number.isInteger(count) || count < Number(input.min) || count > Number(input.max)) {
+    input.value = state.config.topology.agents;
+    toast("初始智能体总数须为 2～32 的整数", true);
+    return;
+  }
+  resizeTeam(count);
 }
 
 const bindings = {
@@ -110,10 +137,11 @@ const bindings = {
 
 function syncForms() {
   for (const [id, [section, field]] of Object.entries(bindings)) $("#" + id).value = state.config[section][field] ?? 0;
-  $("#agents").value = state.config.topology.agents;
+  document.querySelectorAll("[data-team-size]").forEach((input) => { input.value = state.config.topology.agents; });
   $("#train-node-prune").max = $("#eval-node-prune").max = state.config.topology.agents - 2;
   $("#train-node-prune").disabled = $("#eval-node-prune").disabled = !state.nodePruningSupported;
   $("#node-pruning-unavailable").hidden = state.nodePruningSupported;
+  $("#role-config-unavailable").hidden = Boolean(state.roleExamples);
   $("#sampling-temperature").value = state.config.sampling_temperature;
   $("#compare").checked = state.config.evaluation.compare;
   const roundSelect = $("#preview-round");
@@ -189,13 +217,19 @@ function updateNumbers() {
 
 function renderModels(highlight) {
   if (!state.config) return;
-  $("#model-cards").innerHTML = Object.entries(state.config.models).map(([node, spec], index) => {
+  const nodes = [...state.config.roles.map((_, index) => `agent_${index + 1}`), "final"];
+  $("#model-cards").innerHTML = nodes.map((node, index) => {
+    const spec = state.config.models[node];
     const final = node === "final";
     const role = final ? "FinalRefer" : state.config.roles[index];
+    const custom = state.config.role_prompts?.[node] ?? {};
     const present = !state.clearKeys.has(node) && state.keyPresent[node];
     const real = spec.backend !== "mock";
-    return `<article class="card model-card ${highlight === node ? "highlight" : ""}" id="model-${node}"><div class="card-header"><div class="node-heading"><span class="node-chip ${final ? "final" : ""}">${final ? "Σ" : String(index + 1).padStart(2, "0")}</span><div><h2>${escape(roleNames[role])}</h2><small>${node} · ${escape(role)}</small></div></div><span class="badge ${real ? "purple" : "neutral"}">${real ? "API" : "MOCK"}</span></div><div class="card-body">
-      <div class="two-columns"><label>角色<select data-node="${node}" data-model-field="role" ${final ? "disabled" : ""}>${(final ? ["FinalRefer"] : state.roles).map((item) => `<option value="${escape(item)}" ${role === item ? "selected" : ""}>${escape(roleNames[item])}</option>`).join("")}</select></label><label>模型接口<select data-node="${node}" data-model-field="backend">${[["mock", "本地模拟"], ["deepseek", "DeepSeek"], ["openai", "OpenAI 兼容接口"]].map(([value, label]) => `<option value="${value}" ${spec.backend === value ? "selected" : ""}>${label}</option>`).join("")}</select></label></div>
+    return `<article class="card model-card ${highlight === node ? "highlight" : ""}" id="model-${node}"><div class="card-header"><div class="node-heading"><span class="node-chip ${final ? "final" : ""}">${final ? "Σ" : String(index + 1).padStart(2, "0")}</span><div><h2>${escape(roleLabel(node, role))}</h2><small>${node}${final ? " · 最终汇总节点" : ""}</small></div></div><span class="badge ${real ? "purple" : "neutral"}">${real ? "API" : "MOCK"}</span></div><div class="card-body">
+      <div class="two-columns"><label>角色名称<input data-node="${node}" data-role-field="name" maxlength="80" value="${escape(custom.name)}" placeholder="${escape(roleNames[role])}" ${state.roleExamples ? "" : "disabled"}></label><label>默认角色示例<select data-node="${node}" data-model-field="role" ${final ? "disabled" : ""}>${(final ? ["FinalRefer"] : state.roles).map((item) => `<option value="${escape(item)}" ${role === item ? "selected" : ""}>${escape(roleNames[item])}</option>`).join("")}</select></label></div>
+      <label>角色职责<textarea data-node="${node}" data-role-field="instructions" maxlength="5000" rows="4" placeholder="留空使用默认职责和示例" ${state.roleExamples ? "" : "disabled"}>${escape(custom.instructions)}</textarea></label>
+      ${state.roleExamples ? `<details><summary>查看默认职责示例</summary><div class="role-example">${escape(state.roleExamples[role])}</div></details>` : ""}
+      <label>模型接口<select data-node="${node}" data-model-field="backend">${[["mock", "本地模拟"], ["deepseek", "DeepSeek"], ["openai", "OpenAI 兼容接口"]].map(([value, label]) => `<option value="${value}" ${spec.backend === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
       <label>模型名称<input data-node="${node}" data-model-field="model" value="${escape(spec.model)}" placeholder="填写服务商支持的模型名称" autocomplete="off"></label>
       <div ${real ? "" : "hidden"}><label>API 根地址<input data-node="${node}" data-model-field="base_url" value="${escape(spec.base_url || "")}" placeholder="https://api.example.com/v1" autocomplete="off"></label><div class="key-label-row"><span>API 密钥 <span class="key-status ${present ? "" : "missing"}">${present ? "已保存" : "待填写"}</span></span><button class="clear-key" data-clear-key="${node}">清除已保存密钥</button></div><input type="password" data-node="${node}" data-model-field="api_key" value="${escape(state.pendingKeys[node] || "")}" aria-label="${node} API 密钥" placeholder="${present ? "留空沿用已保存密钥" : "输入 API 密钥，仅保存在本机"}" autocomplete="new-password"></div>
       <label ${real ? "hidden" : ""}>固定模拟回答<textarea data-node="${node}" data-model-field="mock_response">${escape(spec.mock_response || "")}</textarea></label>
@@ -269,9 +303,9 @@ function renderGraph() {
   }
   positions.forEach((point, index) => {
     const role = state.config.roles[index];
-    markup += `<g class="graph-node${active.has(index) ? "" : " graph-node-pruned"}" data-graph-node="agent_${index + 1}" tabindex="0" role="button" aria-label="配置 agent_${index + 1}${active.has(index) ? "" : "（本轮已剪除）"}"><circle cx="${point.x}" cy="${point.y}" r="29" fill="#f0f8f4" stroke="#c8dfd4"/><text x="${point.x}" y="${point.y + 5}" text-anchor="middle" fill="#33876b" font-size="13" font-weight="600">A${index + 1}</text><rect x="${point.x - 43}" y="${point.y + 34}" width="86" height="34" rx="4" fill="white" opacity=".9"/><text x="${point.x}" y="${point.y + 46}" text-anchor="middle" fill="#527267" font-size="10">${escape(roleNames[role])}</text><text x="${point.x}" y="${point.y + 59}" text-anchor="middle" fill="#a2b0b4" font-size="8">${active.has(index) ? `agent_${index + 1}` : "本轮已剪除"}</text></g>`;
+    markup += `<g class="graph-node${active.has(index) ? "" : " graph-node-pruned"}" data-graph-node="agent_${index + 1}" tabindex="0" role="button" aria-label="配置 agent_${index + 1}${active.has(index) ? "" : "（本轮已剪除）"}"><circle cx="${point.x}" cy="${point.y}" r="29" fill="#f0f8f4" stroke="#c8dfd4"/><text x="${point.x}" y="${point.y + 5}" text-anchor="middle" fill="#33876b" font-size="13" font-weight="600">A${index + 1}</text><rect x="${point.x - 43}" y="${point.y + 34}" width="86" height="34" rx="4" fill="white" opacity=".9"/><text x="${point.x}" y="${point.y + 46}" text-anchor="middle" fill="#527267" font-size="10">${graphRoleLabel(`agent_${index + 1}`, role)}</text><text x="${point.x}" y="${point.y + 59}" text-anchor="middle" fill="#a2b0b4" font-size="8">${active.has(index) ? `agent_${index + 1}` : "本轮已剪除"}</text></g>`;
   });
-  markup += `<g class="graph-node" data-graph-node="final" tabindex="0" role="button" aria-label="配置最终汇总者"><rect x="${final.x - 36}" y="${final.y - 32}" width="72" height="64" rx="16" fill="#f0edf8" stroke="#dcd5eb"/><text x="${final.x}" y="${final.y + 7}" text-anchor="middle" font-size="24" fill="#8d76b4">Σ</text><text x="${final.x}" y="${final.y + 52}" text-anchor="middle" font-size="11" fill="#73638b">最终汇总</text><text x="${final.x}" y="${final.y + 66}" text-anchor="middle" font-size="8" fill="#a5a0b4">FinalRefer</text></g>`;
+  markup += `<g class="graph-node" data-graph-node="final" tabindex="0" role="button" aria-label="配置最终汇总者"><rect x="${final.x - 36}" y="${final.y - 32}" width="72" height="64" rx="16" fill="#f0edf8" stroke="#dcd5eb"/><text x="${final.x}" y="${final.y + 7}" text-anchor="middle" font-size="24" fill="#8d76b4">Σ</text><text x="${final.x}" y="${final.y + 52}" text-anchor="middle" font-size="11" fill="#73638b">${graphRoleLabel("final", "FinalRefer")}</text><text x="${final.x}" y="${final.y + 66}" text-anchor="middle" font-size="8" fill="#a5a0b4">FinalRefer</text></g>`;
   $("#topology-svg").innerHTML = markup;
   $("#graph-edge-count").textContent = `${active.size} 个讨论节点 · ${graph.spatial.length} 条轮内边 · ${graph.temporal.length} 条跨轮边`;
   $("#graph-note").textContent = state.config.evaluation.checkpoint ? "当前展示所选检查点保留的通信边，边上数字为已学习的权重。" : "预览展示保留候选边对应的无环执行图。实际运行按权重采样，跨轮边读取上一轮回答。";
@@ -423,11 +457,15 @@ function bindEvents() {
   document.querySelectorAll("[data-kind]").forEach((element) => element.addEventListener("click", () => setKind(element.dataset.kind)));
   document.querySelectorAll("[data-action]").forEach((element) => element.addEventListener("click", () => { setKind(element.dataset.action); go("experiments"); }));
   $("#go-experiments").addEventListener("click", () => go("experiments"));
-  $("#agents").addEventListener("input", (event) => {
-    const count = Number(event.target.value);
-    if (Number.isInteger(count) && count >= 2 && count <= 32) resizeTeam(count);
+  document.querySelectorAll("[data-team-size]").forEach((input) => {
+    input.addEventListener("change", () => changeTeamSize(input));
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        input.blur();
+      }
+    });
   });
-  $("#agents").addEventListener("change", (event) => resizeTeam(Math.min(32, Math.max(2, Number(event.target.value) || 2))));
   for (const [id, [section, field]] of Object.entries(bindings)) {
     $("#" + id).addEventListener("input", (event) => {
       state.config[section][field] = event.target.tagName === "SELECT" ? event.target.value : Number(event.target.value);
@@ -466,13 +504,34 @@ function bindEvents() {
     dirty();
   });
   $("#model-cards").addEventListener("input", (event) => {
+    const roleInput = event.target.closest("[data-role-field]");
+    if (roleInput) {
+      const { node, roleField } = roleInput.dataset;
+      const prompts = state.config.role_prompts;
+      const custom = prompts[node] ??= {};
+      if (roleInput.value.trim()) custom[roleField] = roleInput.value;
+      else delete custom[roleField];
+      if (!Object.keys(custom).length) delete prompts[node];
+      if (roleField === "name") {
+        const preset = node === "final" ? "FinalRefer" : state.config.roles[Number(node.split("_")[1]) - 1];
+        $(`#model-${node} h2`).textContent = roleLabel(node, preset);
+        renderGraph();
+      }
+      dirty();
+      return;
+    }
     const input = event.target.closest("[data-model-field]");
     if (!input) return;
     const node = input.dataset.node;
     const field = input.dataset.modelField;
     const spec = state.config.models[node];
     if (field === "api_key") { state.pendingKeys[node] = input.value; state.clearKeys.delete(node); }
-    else if (field === "role") state.config.roles[Number(node.split("_")[1]) - 1] = input.value;
+    else if (field === "role") {
+      state.config.roles[Number(node.split("_")[1]) - 1] = input.value;
+      renderModels();
+      $(`[data-node="${node}"][data-model-field="role"]`).focus();
+      schedulePreview();
+    }
     else if (["temperature", "max_tokens", "timeout"].includes(field)) spec[field] = input.value === "" ? null : Number(input.value);
     else if (field === "base_url") spec[field] = input.value.trim() || null;
     else spec[field] = input.value;
@@ -492,7 +551,12 @@ function bindEvents() {
   });
   for (const id of ["save-top", "save-models"]) $("#" + id).addEventListener("click", () => saveSettings().catch((error) => toast(error.message, true)));
   $("#import-config").addEventListener("click", async () => {
+    if (!state.teamPreservingImport) {
+      toast("请重启平台后导入 API 配置，以保留当前团队人数。", true);
+      return;
+    }
     try {
+      if (state.dirty) await saveSettings(true);
       const result = await api("/api/import-config", {});
       state.config = result.config; state.keyPresent = result.key_present; state.pendingKeys = {}; state.clearKeys.clear();
       state.dirty = false; $("#dirty-status").textContent = "配置已同步";
@@ -506,8 +570,9 @@ function bindEvents() {
       const values = await api("/api/checkpoint-settings", { checkpoint: identity });
       resizeTeam(values.topology.agents);
       state.config.topology = values.topology; state.config.roles = values.roles;
+      state.config.role_prompts = values.role_prompts ?? {};
       state.config.evaluation.checkpoint = identity;
-      syncForms(); schedulePreview(); dirty(); toast("已应用检查点对应的团队与拓扑参数");
+      syncForms(); schedulePreview(); dirty(); toast("已应用检查点的团队、角色与拓扑参数");
     } catch (error) { toast(error.message, true); }
   });
   $("#start-job").addEventListener("click", startJob);
@@ -537,6 +602,8 @@ async function bootstrap() {
   try {
     const result = await api("/api/bootstrap");
     state.nodePruningSupported = result.node_pruning === true;
+    state.teamPreservingImport = result.team_preserving_import === true;
+    state.roleExamples = result.role_examples ?? null;
     state.config = result.config; state.token = result.token; state.roles = result.roles;
     state.datasets = result.datasets; state.keyPresent = result.key_present; state.jobs = result.jobs; state.checkpoints = result.checkpoints;
     bindEvents(); syncForms(); setKind(state.kind); renderDatasetTable(); renderHistory(); await refreshPreview();

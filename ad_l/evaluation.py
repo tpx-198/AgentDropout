@@ -14,10 +14,12 @@ def _normalize_text(text):
     return " ".join(normalize("NFKC", text).casefold().split())
 
 
-def validate_test_prompt_overlap(examples):
+def validate_test_prompt_overlap(examples, role_prompts=None):
     roles = [*PROMPTS["roles"].items(), ("FinalRefer", PROMPTS["decision"])]
     prompts = [(role, field, _normalize_text(prompt[field])) for role, prompt in roles
                for field in ("few_shot", "system")]
+    prompts.extend((node, field, _normalize_text(value)) for node, custom in (role_prompts or {}).items()
+                   for field, value in custom.items())
     overlaps = []
     for example in examples:
         # Compare the question stem even if a multiple-choice example omits its options.

@@ -16,7 +16,7 @@ from langchain_core.messages import AIMessage
 
 from ad_l.models import ModelAdapter
 from ad_l.platform_service import PlatformService, SettingsStore, default_config
-from ad_l.roles import PROMPTS
+from ad_l.roles import PROMPTS, create_team
 from ad_l.topology import load_policy
 from platform_server import make_handler
 
@@ -95,6 +95,35 @@ class PlatformTests(unittest.TestCase):
         self.assertTrue(all(row['split'] == 'test' for row in rows))
         self.assertEqual(result['summary']['trained']['attempted'], 8)
 
+    def test_import_preserves_manually_selected_team_size(self):
+        path = self.root / "configs" / "agents.json"
+        path.parent.mkdir()
+        path.write_text(json.dumps({agent.node_id: {"backend": "mock", "model": "imported"}
+                                    for agent in create_team()}))
+        for count in (2, 8):
+            with self.subTest(count=count):
+                config = copy.deepcopy(self.config)
+                team = create_team(count)
+                config["topology"]["agents"] = count
+                config["roles"] = ["Inspector"] * (count - 1)
+                config["role_prompts"] = {"agent_1": {"instructions": "Check constraints."},
+                                          "final": {"name": "Reviewer"}}
+                config["models"] = {agent.node_id: copy.deepcopy(self.config["models"]["agent_1"])
+                                    for agent in team}
+                config["evaluation"].update(datasets=["gsm8k"], limit=1)
+                self.service.store.save(config)
+
+                imported = self.service.import_local_config()["config"]
+                self.assertEqual(imported["topology"]["agents"], count)
+                self.assertEqual(imported["roles"], config["roles"])
+                self.assertEqual(imported["role_prompts"], config["role_prompts"])
+                self.assertEqual(set(imported["models"]), set(config["models"]))
+                self.assertEqual(imported["models"]["agent_1"]["model"], "imported")
+                self.assertEqual(imported["models"]["final"]["model"], "imported")
+                if count == 8:
+                    self.assertEqual(imported["models"]["agent_7"], config["models"]["agent_7"])
+                self.assertEqual(self.service.plan(imported, "evaluate")["model_calls"], 2 * (count - 1) + 1)
+
     def test_evaluation_blocks_prompt_overlap_outside_sampled_questions(self):
         self.config['evaluation'].update(datasets=['aqua'], limit=1)
         plan = self.service.plan(self.config, 'evaluate')
@@ -104,7 +133,63 @@ class PlatformTests(unittest.TestCase):
         with patch.dict(PROMPTS, {'decision': decision}):
             with self.assertRaisesRegex(ValueError, r'FinalRefer \(few_shot\): aqua:test:0'):
                 self.service.submit('evaluate', self.config)
+        for node in ('agent_2', 'final'):
+            with self.subTest(node=node):
+                self.config['role_prompts'] = {node: {'instructions': decision['few_shot']}}
+                with self.assertRaisesRegex(ValueError, rf'{node} \(instructions\): aqua:test:0'):
+                    self.service.submit('evaluate', self.config)
         self.assertEqual(self.service.history(), [])
+
+    def test_custom_roles_round_trip_through_settings_training_and_evaluation(self):
+        prompts = {'agent_1': {'name': '证据核验员', 'instructions': 'Check the claims against the given evidence.'},
+                   'final': {'name': '结论编辑', 'instructions': 'Report the best-supported conclusion.'}}
+        self.config['role_prompts'] = prompts
+        self.config['training'].update(datasets=['gsm8k'], steps=1, batch_size=1)
+        self.config['evaluation'].update(datasets=['aqua'], limit=1, mode='fixed')
+        saved = self.request('/api/config', body={'config': self.config})
+        self.assertEqual(saved['body']['config']['role_prompts'], prompts)
+        boot = self.request('/api/bootstrap')['body']
+        self.assertEqual(boot['config']['role_prompts'], prompts)
+        self.assertEqual(boot['role_examples']['FinalRefer'], PROMPTS['decision']['system'])
+        self.assertEqual(SettingsStore(self.service.store.path).public()['config']['role_prompts'], prompts)
+
+        job = self.service.submit('train', saved['body']['config'])
+        self.wait_for_idle()
+        identity = f"job:{job['id']}"
+        settings = self.request('/api/checkpoint-settings', body={'checkpoint': identity})
+        self.assertEqual(settings['body']['role_prompts'], prompts)
+        training = self.service.export(job['id'])['details']['rows'][0]
+        training_calls = {call['node_id']: call for call in training['result']['trace']}
+        self.assertEqual(training_calls['agent_1']['messages'][0]['content'], prompts['agent_1']['instructions'])
+        self.assertIn('The answer is <number>', training_calls['final']['messages'][0]['content'])
+        self.assertTrue(training['correct'])
+
+        self.config['evaluation']['checkpoint'] = identity
+        self.config['models']['final']['mock_response'] = 'The answer is A'
+        job = self.service.submit('evaluate', self.config)
+        self.wait_for_idle()
+        rows = self.service.export(job['id'])['details']['rows']
+        self.assertEqual({row['group'] for row in rows}, {'baseline', 'trained'})
+        for row in rows:
+            self.assertTrue(row['correct'])
+            for call in row['result']['trace']:
+                node = call['node_id']
+                if node in prompts:
+                    self.assertEqual(call['role'], prompts[node]['name'])
+                    self.assertTrue(call['messages'][0]['content'].startswith(prompts[node]['instructions']))
+                    default = PROMPTS['decision'] if node == 'final' else PROMPTS['roles']['Math Solver']
+                    self.assertNotIn(default['few_shot'], call['messages'][1]['content'])
+                if node == 'final':
+                    self.assertIn('using one letter', call['messages'][0]['content'])
+
+    def test_role_config_rejects_unknown_nodes_and_uses_defaults_for_older_settings(self):
+        del self.config['role_prompts']
+        self.assertEqual(self.service.store.save(self.config)['config']['role_prompts'], {})
+        for prompts in ({'agent_5': {'instructions': 'Check constraints.'}}, {'final': {'instructions': 42}}):
+            with self.subTest(prompts=prompts):
+                self.config['role_prompts'] = prompts
+                result = self.request('/api/config', body={'config': self.config})
+                self.assertEqual(result['status'], 400)
 
     def test_node_pruning_produces_a_checkpoint_and_reduces_paired_call_budget(self):
         self.config["training"].update(datasets=["gsm8k"], steps=1, batch_size=1,

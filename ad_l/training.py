@@ -71,7 +71,7 @@ def score_example(answer: str, example: Example):
 
 
 def train_step(policy, optimizer, examples, adapters, generator, *, sparsity=0.01, temperature=1.0,
-               allow_real_api=False, roles=None, should_stop=None):
+               allow_real_api=False, roles=None, role_prompts=None, should_stop=None):
     if not examples or not math.isfinite(sparsity) or sparsity < 0:
         raise ValueError("Provide a nonempty batch and a finite nonnegative sparsity coefficient")
     if any(example.split != "train" for example in examples):
@@ -79,7 +79,7 @@ def train_step(policy, optimizer, examples, adapters, generator, *, sparsity=0.0
     if {id(value) for value in policy.parameters()} != {
             id(value) for group in optimizer.param_groups for value in group["params"]}:
         raise ValueError("Optimizer parameters must match the policy")
-    team = create_team(policy.config.agents, roles)
+    team = create_team(policy.config.agents, roles, role_prompts=role_prompts)
     rng_before = generator.get_state()
     losses, episodes = [], []
     policy.train()
@@ -87,7 +87,7 @@ def train_step(policy, optimizer, examples, adapters, generator, *, sparsity=0.0
     for example in examples:
         sampled = policy.sample(generator, temperature=temperature)
         graph = build_system(team, sampled.execution, adapters, allow_real_api=allow_real_api, should_stop=should_stop)
-        state = graph.invoke({"task": example.task, "answer_type": example.answer_type})
+        state = graph.invoke({"task": example.task, "answer_type": example.answer_type, "dataset": example.dataset})
         score = score_example(state["answer"], example) if state["status"] == "success" else {"prediction": None, "correct": False}
         reward = float(score["correct"])
         episodes.append({"sample_id": example.sample_id, "dataset": example.dataset, "split": example.split,

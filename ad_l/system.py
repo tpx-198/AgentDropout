@@ -94,7 +94,7 @@ def build_system(team: tuple[Agent, ...], execution: dict, adapters: dict[str, M
                 "answer": "", "status": "running", "model_calls": 0, "real_api_calls": 0, "usage": None}
 
     def visible(outputs, sources):
-        return {workers[source].node_id: {"role": workers[source].role,
+        return {workers[source].node_id: {"role": workers[source].label,
                                          "output": outputs[workers[source].node_id]}
                 for source in sources}
 
@@ -109,18 +109,20 @@ def build_system(team: tuple[Agent, ...], execution: dict, adapters: dict[str, M
             if final:
                 spatial = visible(state["previous"], execution["summary"])
                 temporal = {}
-                messages = decision_messages(state["task"], spatial, answer_type, dataset=dataset)
+                messages = decision_messages(state["task"], spatial, answer_type, dataset=dataset,
+                                             instructions=agent.instructions)
             else:
                 graph = execution["rounds"][round_index]
                 spatial = visible(state["current"], [source for source, target in graph["spatial"] if target == worker_index])
                 temporal = visible(state["previous"], [source for source, target in graph["temporal"] if target == worker_index])
-                messages = worker_messages(state["task"], agent.role, spatial, temporal, answer_type, dataset=dataset)
+                messages = worker_messages(state["task"], agent.role, spatial, temporal, answer_type,
+                                           dataset=dataset, instructions=agent.instructions)
             return messages, spatial, temporal
 
         def complete(state, messages, spatial, temporal, started, response=None, error=None):
             if error is None and (not isinstance(response, AIMessage) or not isinstance(response.content, str)):
                 error = TypeError("Expected an AIMessage with textual content")
-            entry = {"node_id": agent.node_id, "role": agent.role, "round": round_index + 1,
+            entry = {"node_id": agent.node_id, "role": agent.label, "round": round_index + 1,
                      "stage": "final" if final else "discussion", "spatial": spatial, "temporal": temporal,
                      "messages": [{"role": message.type, "content": message.content} for message in messages],
                      "output": response.content if error is None else None,

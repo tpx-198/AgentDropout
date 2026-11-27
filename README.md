@@ -1,12 +1,12 @@
 # AD-L
 
 使用 LangChain 接入模型，LangGraph 执行通信流程，PyTorch 学习边权重。
-默认共 5 个智能体，依次为 Math Solver、Mathematical Analyst、Programming Expert、Inspector、FinalRefer。前 4 个参与讨论，最后一个汇总。默认两轮，每题共 9 次模型调用。
+默认共 5 个智能体，依次为 Math Solver、Mathematical Analyst、Programming Expert、Inspector、FinalRefer。前 4 个参与讨论，最后一个汇总。默认两轮，每题共 9 次模型调用。可在「实验工作台」或「训练与评测」设置 2～32 个初始智能体，总数包含 1 个汇总节点。
 
 日常实验可直接双击项目中的 `启动评测平台.command`。平台会启动本机服务并打开浏览器，默认地址为 `http://127.0.0.1:8765`，使用已有的 `ad-l` 环境。再次双击会打开已经运行的平台。
 
 - 实验工作台设置智能体数量、讨论轮数、拓扑、边权重与随机种子，并预览通信图。
-- 智能体与模型页面配置每个节点的角色、服务类型、模型名称、API 地址和密钥，也可导入现有 `configs/agents.json` 与本地 `.env`。
+- 智能体与模型页面可为每个节点自定义角色名称和职责，并设置服务类型、模型名称、API 地址和密钥。也可按当前团队的节点 ID 导入 `configs/agents.json` 与本地 `.env` 中对应的 API 配置。
 - 训练与评测页面选择数据集与参数，点击按钮启动任务，查看进度、损失和逐题结果，并可取消任务。
 - 测试集评测可选择已训练检查点，应用其团队设置，与初始拓扑进行同题、同模式对照。
 - 运行记录保存实验状态、训练检查点和完整调用记录，支持浏览器下载结果 JSON 和检查点。
@@ -23,7 +23,31 @@ python run.py --agents 8 --rounds 3 --topology random --seed 42
 python run.py --topology layered --layers 2 --async
 ```
 
-`--agents` 包含汇总者。增加数量时循环分配四种讨论角色，`--roles "Math Solver" "Mathematical Analyst" "Programming Expert" "Inspector"` 可指定各讨论节点角色。
+`run.py` 和 `train.py` 都可用 `--agents` 设置初始人数，包含汇总者。增加数量时循环分配四种讨论角色示例，`--roles "Math Solver" "Mathematical Analyst" "Programming Expert" "Inspector"` 可为各讨论节点选择默认示例。
+
+### 自定义角色职责
+
+在 **智能体与模型** 中，打开节点卡片，填写「角色名称」和「角色职责」，再点击「保存智能体配置」。每个讨论节点和 `final` 都可以独立编辑。填写职责会替换该节点的内置系统提示词和 few-shot 示例。清空职责即恢复默认示例。角色名称显示在拓扑图与调用记录中。
+
+系统按拓扑给节点传入题目和可见回答，`final` 负责提交团队的最终答案。训练或评测时，自定义 `final` 会自动收到当前题型的判分格式。应用检查点会载入当时保存的职责，也可以在同一拓扑上修改职责后另跑一组评测。
+
+命令行用 `--role-prompts` 指定一个按节点 ID 编写的 JSON 文件。`name` 和 `instructions` 均为可选，省略的节点使用默认示例。可将以下内容保存为 `roles.json`。
+
+```json
+{
+  "agent_1": {"name": "任务分析员", "instructions": "识别题目目标与约束，列出需要解决的问题。"},
+  "agent_2": {"name": "证据核验员", "instructions": "根据题目和已有回答核验证据，指出有依据的结论和信息缺口。"},
+  "final": {"name": "结论编辑", "instructions": "整理可见回答，给出清晰结论，并说明影响结论的不确定性。"}
+}
+```
+
+```bash
+python run.py --agents 3 --role-prompts roles.json --task "比较两种课程安排，给出选择依据。"
+python train.py --agents 3 --role-prompts roles.json --datasets gsm8k --output checkpoints/custom-roles.pt
+python run.py --checkpoint checkpoints/custom-roles.pt
+```
+
+`run.py --checkpoint` 默认恢复保存的职责。显式传入 `--role-prompts` 时使用指定文件的配置。
 
 `--topology` 提供 `full`、`random`、`layered`、`chain`、`star`、`debate`。默认 `full`。随机图使用 `--density` 和 `--seed` 控制候选连接。分层图只连接相邻层，链式依次相连，星形由第一个讨论节点向其他节点发送，辩论式只进行跨轮通信。
 
@@ -81,7 +105,7 @@ python prepare_data.py --datasets aptbench_swe aptbench_dr aptbench_tool aptbenc
 
 默认使用固定模拟回答，模拟运行只验证流程，无法衡量模型准确率或剪枝收益。`--sparsity` 控制概率矩阵核范数与汇总权重均值的惩罚项。可用 `--sparsity 0` 单独研究策略梯度。
 
-本实现保留原项目的角色，最终汇总者使用本项目自编的示例。平台在测试集评测前检查所有角色的系统提示词与示例，发现题干与所选数据集的完整测试集重合时阻止启动。通信消息统一传入可见回答原文。Programming Expert 生成的代码作为文本参与讨论。汇总输入边也参与学习，训练目标采用概率矩阵正则化。节点和边都在同一次训练后剪枝，论文另设剪节点后重新训练边权的阶段。
+平台在测试集评测前，将默认系统提示词、few-shot 示例和自定义角色文本与所选数据集的完整测试集比较。发现提示词含有测试题干时会阻止启动，并显示节点或角色和样本 ID。匹配会归一化大小写、Unicode 和空白字符。通信消息统一传入可见回答原文。汇总输入边也参与学习，训练目标采用概率矩阵正则化。节点和边都在同一次训练后剪枝，论文另设剪节点后重新训练边权的阶段。
 
 真实解题和任务驱动训练需要大模型 API。将 `.env.example` 复制为 `.env`，填写 `DEEPSEEK_API_KEY` 和账户可用的 `DEEPSEEK_MODEL`，再显式启用真实请求。已有环境变量优先于 `.env`。
 

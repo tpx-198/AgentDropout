@@ -89,24 +89,32 @@ class TrainingTests(unittest.TestCase):
     def test_training_checkpoint_and_run_work_without_tests_directory(self):
         with tempfile.TemporaryDirectory() as directory:
             checkpoint = Path(directory) / 'policy.pt'
+            roles_file = Path(directory) / 'roles.json'
+            roles = {'agent_1': {'name': 'Analyst', 'instructions': 'Identify the required inputs.'},
+                     'final': {'name': 'Editor', 'instructions': 'Write a clear conclusion.'}}
+            roles_file.write_text(json.dumps(roles), encoding='utf-8')
             spec = importlib.util.spec_from_file_location('train_entry', ROOT / 'train.py')
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
-            with patch.object(sys, 'argv', ['train.py', '--steps', '1', '--limit', '2', '--output', str(checkpoint)]), \
+            with patch.object(sys, 'argv', ['train.py', '--steps', '1', '--limit', '2', '--output', str(checkpoint),
+                                            '--role-prompts', str(roles_file)]), \
                     contextlib.redirect_stdout(io.StringIO()):
                 module.main()
             policy, metadata = load_policy(checkpoint)
             self.assertEqual(metadata['real_api_calls'], 0)
             self.assertEqual(metadata['metrics_kind'], 'mock_diagnostic')
             self.assertEqual(policy.config.agents, 5)
+            self.assertEqual(metadata['role_prompts'], roles)
             standalone = Path(directory) / 'standalone'
             standalone.mkdir()
             shutil.copytree(ROOT / 'ad_l', standalone / 'ad_l')
             shutil.copyfile(ROOT / 'run.py', standalone / 'run.py')
             output = io.StringIO()
+            result_file = Path(directory) / 'run.json'
             standalone_path = [str(standalone), *[entry for entry in sys.path if Path(entry or '.').resolve() != ROOT]]
             with patch.dict(sys.modules), patch.object(sys, 'path', standalone_path), \
-                    patch.object(sys, 'argv', ['run.py', '--checkpoint', str(checkpoint), '--async']), \
+                    patch.object(sys, 'argv', ['run.py', '--checkpoint', str(checkpoint), '--async',
+                                              '--task', 'Describe a simple daily routine.', '--output', str(result_file)]), \
                     contextlib.redirect_stdout(output):
                 for name in list(sys.modules):
                     if name == 'ad_l' or name.startswith('ad_l.'):
@@ -117,6 +125,13 @@ class TrainingTests(unittest.TestCase):
                 module.main()
                 self.assertEqual(Path(sys.modules['ad_l'].__file__).parent, standalone / 'ad_l')
             self.assertIn('real calls 0', output.getvalue())
+            result = json.loads(result_file.read_text())
+            self.assertEqual(result['role_prompts'], roles)
+            for call in result['result']['trace']:
+                node = call['node_id']
+                if node in roles:
+                    self.assertEqual(call['role'], roles[node]['name'])
+                    self.assertEqual(call['messages'][0]['content'], roles[node]['instructions'])
 
 
 if __name__ == '__main__':

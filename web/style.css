@@ -729,6 +729,15 @@ tr:last-child td {
   resize:vertical;
   min-height:65px
 }
+.role-example {
+  margin-top:8px;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere;
+  line-height:1.5
+}
+.node-heading h2 {
+  overflow-wrap:anywhere
+}
 .experiment-tabs {
   display:inline-flex;
   gap:5px;

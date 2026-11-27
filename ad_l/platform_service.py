@@ -21,7 +21,7 @@ from ad_l.datasets import DATASETS, TRAIN_DATASETS, load_training_mix, read_exam
 from ad_l.evaluation import evaluate_examples, summarize_rows, uses_mock_models, validate_test_prompt_overlap
 from ad_l.model_config import load_agent_config
 from ad_l.models import ModelSettings, create_model
-from ad_l.roles import PROMPTS, create_team
+from ad_l.roles import PROMPTS, create_team, role_prompts_from_team
 from ad_l.topology import EdgePolicy, TopologyConfig, load_policy, save_policy
 from ad_l.training import train_step
 
@@ -42,7 +42,7 @@ def atomic_json(path: Path, value):
 
 def default_config():
     team = create_team()
-    return {"topology": asdict(TopologyConfig()), "roles": [agent.role for agent in team[:-1]],
+    return {"topology": asdict(TopologyConfig()), "roles": [agent.role for agent in team[:-1]], "role_prompts": {},
             "models": {agent.node_id: {"backend": "mock", "model": "local-fixed-response", "base_url": None,
                         "temperature": None, "max_tokens": None, "timeout": 60.0,
                         "mock_response": "[MOCK fixed response]\nThe answer is 5"} for agent in team},
@@ -64,7 +64,8 @@ def validate_config(config):
     _integer(topology.agents, 2, 32, "智能体数量")
     _integer(topology.rounds, 1, 10, "讨论轮数")
     _integer(topology.seed, -2147483648, 2147483647, "随机种子")
-    team = create_team(topology.agents, config["roles"])
+    team = create_team(topology.agents, config["roles"], role_prompts=config.get("role_prompts"))
+    config["role_prompts"] = role_prompts_from_team(team)
     if set(config["models"]) != {agent.node_id for agent in team}:
         raise ValueError("每个智能体都需要单独的模型配置")
     for agent in team:
@@ -185,25 +186,22 @@ class PlatformService:
         config = state["config"]
         path = self.root / "configs/agents.json"
         values = json.loads(path.read_text())
-        team = create_team(len(values))
-        imported = load_agent_config(path, team)
+        imported = load_agent_config(path, create_team(len(values)))
         env = {**{key: value for key, value in dotenv_values(self.root / ".env").items() if value is not None}, **os.environ}
-        config["topology"]["agents"] = len(team)
-        config["roles"] = [agent.role for agent in team[:-1]]
-        config["models"] = {}
         keys = {}
-        for agent in team:
-            spec = imported["nodes"][agent.node_id]
+        for node, spec in imported["nodes"].items():
+            if node not in config["models"]:
+                continue
             backend = spec.get("backend", "deepseek")
             model = spec.get("model", env.get(spec.get("model_env", ""), ""))
-            config["models"][agent.node_id] = {
+            config["models"][node] = {
                 "backend": backend, "model": model, "base_url": spec.get("base_url"),
                 "temperature": spec.get("temperature"), "max_tokens": spec.get("max_tokens"),
                 "timeout": spec.get("timeout", 60),
                 "mock_response": spec.get("mock_response", "[MOCK fixed response]\nThe answer is 5")}
             key_name = spec.get("api_key_env", "DEEPSEEK_API_KEY" if backend == "deepseek" else "OPENAI_API_KEY")
             if env.get(key_name):
-                keys[agent.node_id] = env[key_name]
+                keys[node] = env[key_name]
         return self.store.save(config, keys)
 
     def checkpoints(self):
@@ -230,8 +228,11 @@ class PlatformService:
         identity = config["evaluation"]["checkpoint"] if kind == "evaluate" else ""
         if identity:
             policy, metadata = load_policy(self._checkpoint(identity))
-            if policy.config != topology or metadata.get("roles") != config["roles"]:
-                raise ValueError("当前智能体、轮数、拓扑或角色与检查点不一致，请先应用检查点设置")
+            roles = metadata.get("roles")
+            if roles is None:
+                roles = [agent.role for agent in create_team(policy.config.agents)[:-1]]
+            if policy.config != topology or roles != config["roles"]:
+                raise ValueError("当前团队拓扑或角色示例与检查点不一致，请先应用检查点设置")
         else:
             policy = EdgePolicy(topology)
         if kind == "evaluate":
@@ -246,8 +247,9 @@ class PlatformService:
 
     def checkpoint_settings(self, identity):
         policy, metadata = load_policy(self._checkpoint(identity))
-        fallback = [agent.role for agent in create_team(policy.config.agents)[:-1]]
-        return {"topology": asdict(policy.config), "roles": metadata.get("roles", fallback)}
+        team = create_team(policy.config.agents, metadata.get("roles"), role_prompts=metadata.get("role_prompts"))
+        return {"topology": asdict(policy.config), "roles": [agent.role for agent in team[:-1]],
+                "role_prompts": role_prompts_from_team(team)}
 
     def preview(self, config):
         config = validate_config(config)
@@ -267,7 +269,7 @@ class PlatformService:
             if not path.is_file():
                 raise ValueError(f"{name} 测试集尚未准备")
             records, info = read_examples(path, expected_split="test", dataset=name)
-            validate_test_prompt_overlap(records)
+            validate_test_prompt_overlap(records, config["role_prompts"])
             if section["limit"] > len(records):
                 raise ValueError(f"{name} 测试集只有 {len(records)} 题，请调小抽样题数")
             indices = sorted(random.Random(config["topology"]["seed"]).sample(range(len(records)), section["limit"]))
@@ -363,7 +365,7 @@ class PlatformService:
             config = copy.deepcopy(config)
             policy = self._policy(config, job["kind"])
             examples, dataset = self._examples(config, job["kind"])
-            team = create_team(policy.config.agents, config["roles"])
+            team = create_team(policy.config.agents, config["roles"], role_prompts=config["role_prompts"])
             adapters = self._adapters(config, keys, allow_real_api, job["plan"]["calls_by_agent"])
             keys.clear()
             diagnostic = any(adapter.settings.backend == "mock" for adapter in adapters.values())
@@ -399,7 +401,8 @@ class PlatformService:
             batch = [examples[(step * parameters["batch_size"] + offset) % len(examples)] for offset in range(parameters["batch_size"])]
             report = train_step(policy, optimizer, batch, adapters, generator, sparsity=parameters["sparsity"],
                                 temperature=config["sampling_temperature"], allow_real_api=allow_real_api,
-                                roles=config["roles"], should_stop=self.cancel_event.is_set)
+                                roles=config["roles"], role_prompts=config["role_prompts"],
+                                should_stop=self.cancel_event.is_set)
             reports.append(report)
             for episode in report["episodes"]:
                 rows.append({**episode, "group": "training", "elapsed_seconds": sum(call["elapsed_seconds"] for call in episode["result"]["trace"])})
@@ -413,6 +416,7 @@ class PlatformService:
                 job["message"] = f"已完成 {job['completed_steps']} / {parameters['steps']} 步"
                 self._persist(job)
             metadata = {"status": report["status"], "roles": config["roles"], "dataset": dataset,
+                        "role_prompts": config["role_prompts"],
                         "history": reports, "settings": {node: asdict(adapter.settings) for node, adapter in adapters.items()},
                         "hyperparameters": parameters, "metrics_kind": "mock_diagnostic" if diagnostic else "model_training",
                         "prompt_source": PROMPTS["source"], "completed_steps": job["completed_steps"]}

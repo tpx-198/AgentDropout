@@ -8,7 +8,7 @@ from pathlib import Path
 
 from ad_l.models import ModelSettings, create_model
 from ad_l.model_config import create_agent_models
-from ad_l.roles import create_team
+from ad_l.roles import create_team, role_prompts_from_team
 from ad_l.topology import EdgePolicy, TEMPORAL_MODES, TOPOLOGIES, TopologyConfig, load_policy
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,7 +23,8 @@ def add_arguments(parser: argparse.ArgumentParser):
     parser.add_argument("--density", type=float, help="Random candidate graph density; default 0.5")
     parser.add_argument("--layers", type=int, help="Number of layers; default 2")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--roles", nargs="+", help="One quoted role name per discussion agent")
+    parser.add_argument("--roles", nargs="+", help="One quoted default role example per discussion agent")
+    parser.add_argument("--role-prompts", type=Path, help="JSON role names and responsibilities keyed by agent ID")
     parser.add_argument("--deepseek", action="store_true", help="Authorize real DeepSeek API requests")
     parser.add_argument("--api-config", type=Path, help="JSON model/API settings keyed by agent ID")
     parser.add_argument("--allow-real-api", action="store_true", help="Authorize real APIs selected by --api-config")
@@ -41,6 +42,7 @@ def add_arguments(parser: argparse.ArgumentParser):
 def resolve_policy(args, checkpoint: Path | None = None):
     defaults = asdict(TopologyConfig())
     names = ("agents", "rounds", "topology", "temporal", "initial_weight", "density", "layers")
+    metadata = {}
     if checkpoint is not None:
         policy, metadata = load_policy(checkpoint)
         saved = asdict(policy.config)
@@ -53,7 +55,12 @@ def resolve_policy(args, checkpoint: Path | None = None):
         values = {name: defaults[name] if getattr(args, name) is None else getattr(args, name) for name in names}
         policy = EdgePolicy(TopologyConfig(**values, seed=args.seed))
         roles = args.roles
-    team = create_team(policy.config.agents, roles)
+    role_prompts = metadata.get("role_prompts")
+    if args.role_prompts is not None:
+        role_prompts = json.loads(args.role_prompts.read_text(encoding="utf-8"))
+        if not isinstance(role_prompts, dict):
+            raise ValueError("--role-prompts requires a JSON object keyed by agent ID")
+    team = create_team(policy.config.agents, roles, role_prompts=role_prompts)
     return policy, team
 
 
@@ -81,7 +88,8 @@ def adapters_from_args(args, team, agent_config=None, *, active_nodes=None):
 
 def print_plan(policy, team, examples=1):
     calls = policy.calls_by_agent(team, examples)
-    return {"agents": [asdict(agent) for agent in team], "topology": asdict(policy.config),
+    return {"agents": [{"node_id": agent.node_id, "role": agent.role} for agent in team],
+            "role_prompts": role_prompts_from_team(team), "topology": asdict(policy.config),
             "planned_model_calls": sum(calls.values()), "planned_model_calls_by_agent": calls}
 
 
